@@ -85,10 +85,12 @@ class Bot:
         raise RuntimeError("天天象棋 window not found!")
 
     def screenshot_for_processing(self):
-        """Capture window, return image in process coords."""
+        """Capture window, return image. Uses unique filename each time."""
+        self._ss_counter = getattr(self, '_ss_counter', 0) + 1
+        path = f"/tmp/xiangqi_ss_{self._ss_counter % 3}.png"
         subprocess.run(['screencapture', '-x', '-o', '-l', str(self.win_id),
-                        SCREENSHOT_PATH], capture_output=True, check=True)
-        full = cv2.imread(SCREENSHOT_PATH)
+                        path], capture_output=True, check=True)
+        full = cv2.imread(path)
         if full is None:
             raise RuntimeError("Screenshot failed!")
         # Determine retina scale from window capture
@@ -1412,7 +1414,7 @@ class Bot:
                     pts = self.uci_to_logical(best)
                     print(f"  Click: ({pts[0][0]:.0f},{pts[0][1]:.0f}) → ({pts[1][0]:.0f},{pts[1][1]:.0f})")
 
-                    # Capture BEFORE clicking (baseline for opponent detection)
+                    # Capture BEFORE clicking (baseline for detection)
                     img_before_move = self.screenshot_for_processing()
 
                     self.activate_window()
@@ -1421,32 +1423,36 @@ class Bot:
                     time.sleep(0.8)
                     self.click(pts[1][0], pts[1][1])
 
-                    # Phase 1: Wait for OUR animation to finish (~1.5s)
-                    time.sleep(1.5)
-                    img_after_our_move = self.screenshot_for_processing()
-                    snap_after_our = self.crop_board_region(img_after_our_move)
+                    # Wait for our move + opponent response + animations
+                    # Simple approach: wait, poll for stability
+                    time.sleep(1.0)
+                    print("  Waiting...", end="", flush=True)
 
-                    # Phase 2: Wait for opponent to move (poll for change)
-                    print("  Waiting for opponent...", end="", flush=True)
-                    opponent_moved = False
-                    for wait in range(20):  # Up to 16 seconds
-                        time.sleep(0.8)
-                        img_check = self.screenshot_for_processing()
-                        snap_check = self.crop_board_region(img_check)
-                        if self.images_changed(snap_after_our, snap_check):
-                            # Opponent started moving, wait for their animation
-                            time.sleep(1.5)
-                            img_after = self.screenshot_for_processing()
-                            opponent_moved = True
-                            print(" moved!")
-                            break
-                        sys.stdout.write(".")
+                    # Take snapshots and wait until board is stable for 2 consecutive checks
+                    prev_check = self.crop_board_region(self.screenshot_for_processing())
+                    stable = 0
+                    for wait_i in range(30):
+                        time.sleep(0.6)
+                        curr_check = self.crop_board_region(self.screenshot_for_processing())
+                        if self.images_changed(prev_check, curr_check):
+                            stable = 0
+                            sys.stdout.write("~")
+                        else:
+                            stable += 1
+                            sys.stdout.write(".")
                         sys.stdout.flush()
+                        prev_check = curr_check
+                        # Need at least 4 stable + at least 3 seconds elapsed
+                        if stable >= 4 and wait_i >= 4:
+                            break
 
-                    if not opponent_moved:
-                        # Maybe opponent already moved during our animation
-                        img_after = self.screenshot_for_processing()
-                        print(" (fast opponent)")
+                    img_after_our_move = self.screenshot_for_processing()
+
+                    # If opponent is fast, img_after_our_move already has their response.
+                    # Take one more screenshot after a short extra wait to be sure.
+                    time.sleep(1.5)
+                    img_after = self.screenshot_for_processing()
+                    print(" done!")
 
                     # Update board by applying our known move
                     fc, fr = ord(best[0]) - ord('a'), int(best[1])
@@ -1471,25 +1477,25 @@ class Bot:
                         break
 
                     # Debug: verify images differ
-                    total_diff = cv2.absdiff(img_before_move, img_after).mean()
-                    phase_diff = cv2.absdiff(img_after_our_move, img_after).mean()
-                    print(f"  Diffs: before→after={total_diff:.1f}, ourMove→after={phase_diff:.1f}")
+                    d1 = cv2.absdiff(img_before_move, img_after).mean()
+                    d2 = cv2.absdiff(img_after_our_move, img_after).mean()
+                    print(f"  Diffs: before→after={d1:.1f}, mid→after={d2:.1f}")
 
-                    # Detect opponent's move
-                    # Try comparing before_our_move vs after (includes both moves)
-                    result = self.detect_move_perft(img_before_move, img_after, board, fen)
-                    if result is None:
-                        # Retry with fresh screenshot
-                        print("  Retrying...")
-                        time.sleep(2.0)
-                        img_after = self.screenshot_for_processing()
+                    # Try detection with best available image pair
+                    result = None
+                    if d1 > 0.1:
                         result = self.detect_move_perft(img_before_move, img_after, board, fen)
-                    if result is None:
-                        # Try comparing after_our_move vs after (only opponent's move)
-                        print("  Trying phase comparison...")
+                    if result is None and d2 > 0.1:
+                        print("  Trying mid→after...")
                         result = self.detect_move_perft(img_after_our_move, img_after, board, fen)
+                    if result is None and d1 > 0.1:
+                        # One more try with fresh screenshot
+                        print("  Retrying with fresh screenshot...")
+                        time.sleep(2.0)
+                        img_fresh = self.screenshot_for_processing()
+                        result = self.detect_move_perft(img_before_move, img_fresh, board, fen)
                     if result is None:
-                        print("  ⚠ Could not detect. Stopping to avoid FEN drift.")
+                        print(f"  ⚠ Could not detect (diffs: {d1:.1f}, {d2:.1f}). Stopping.")
                         break
                     board = result
                     fen = self.board_to_fen(board)
