@@ -117,19 +117,21 @@ class Bot:
     # --- Calibration ---
 
     def calibrate(self):
-        """Interactive calibration: user points to 2 corner pieces."""
+        """Calibration: user points mouse to 2 corner pieces (countdown, no Enter needed)."""
         print("\n=== CALIBRATION ===")
-        print("Move your mouse to the TOP-LEFT corner piece")
-        print("(row 0, col a — the leftmost piece on the top back rank)")
-        input("Press Enter when ready...")
+        print("Move mouse to TOP-LEFT corner piece (leftmost piece on top rank)")
+        for i in range(5, 0, -1):
+            print(f"  Capturing in {i}...", end="\r")
+            time.sleep(1)
         x1, y1 = pyautogui.position()
-        print(f"  Top-left: ({x1}, {y1})")
+        print(f"  Top-left: ({x1}, {y1})        ")
 
-        print("\nMove your mouse to the BOTTOM-RIGHT corner piece")
-        print("(row 9, col i — the rightmost piece on the bottom back rank)")
-        input("Press Enter when ready...")
+        print("\nNow move mouse to BOTTOM-RIGHT corner piece (rightmost piece on bottom rank)")
+        for i in range(5, 0, -1):
+            print(f"  Capturing in {i}...", end="\r")
+            time.sleep(1)
         x2, y2 = pyautogui.position()
-        print(f"  Bottom-right: ({x2}, {y2})")
+        print(f"  Bottom-right: ({x2}, {y2})        ")
 
         self.cell_w = (x2 - x1) / 8.0
         self.cell_h = (y2 - y1) / 9.0
