@@ -140,33 +140,63 @@ class Bot:
         print(f"\n  Cell size: {self.cell_w:.1f} x {self.cell_h:.1f} logical pixels")
         print(f"  Grid: x=[{x1:.0f}..{x2:.0f}] y=[{y1:.0f}..{y2:.0f}]")
 
-        # Save calibration
+        # Save calibration as relative to window (survives resize)
         import json
+        win_w = self._get_window_width()
+        win_h = self._get_window_height()
         with open(CALIB_PATH, 'w') as f:
-            json.dump({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                       'win_x': self.win_x, 'win_y': self.win_y}, f)
+            json.dump({
+                'rx1': (x1 - self.win_x) / win_w,
+                'ry1': (y1 - self.win_y) / win_h,
+                'rx2': (x2 - self.win_x) / win_w,
+                'ry2': (y2 - self.win_y) / win_h,
+            }, f)
         print(f"  Saved to {CALIB_PATH}")
 
+    def _get_window_width(self):
+        windows = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+        for w in windows:
+            if w.get('kCGWindowNumber') == self.win_id:
+                return int(w['kCGWindowBounds']['Width'])
+        return 1628  # fallback
+
+    def _get_window_height(self):
+        windows = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+        for w in windows:
+            if w.get('kCGWindowNumber') == self.win_id:
+                return int(w['kCGWindowBounds']['Height'])
+        return 960  # fallback
+
     def load_calibration(self):
-        """Load previous calibration if available."""
+        """Load calibration, auto-adapt to current window size/position."""
         import json
         if not os.path.exists(CALIB_PATH):
             return False
         try:
             with open(CALIB_PATH) as f:
                 d = json.load(f)
-            x1, y1, x2, y2 = d['x1'], d['y1'], d['x2'], d['y2']
+
+            # Support both relative (new) and absolute (old) formats
+            if 'rx1' in d:
+                win_w = self._get_window_width()
+                win_h = self._get_window_height()
+                x1 = self.win_x + d['rx1'] * win_w
+                y1 = self.win_y + d['ry1'] * win_h
+                x2 = self.win_x + d['rx2'] * win_w
+                y2 = self.win_y + d['ry2'] * win_h
+            else:
+                x1, y1, x2, y2 = d['x1'], d['y1'], d['x2'], d['y2']
+                if d.get('win_x') != self.win_x or d.get('win_y') != self.win_y:
+                    dx = self.win_x - d.get('win_x', 0)
+                    dy = self.win_y - d.get('win_y', 0)
+                    x1 += dx; y1 += dy; x2 += dx; y2 += dy
+
             self.cell_w = (x2 - x1) / 8.0
             self.cell_h = (y2 - y1) / 9.0
             self.cols_logical = [x1 + i * self.cell_w for i in range(9)]
             self.rows_logical = [y1 + j * self.cell_h for j in range(10)]
-            # Check if window moved
-            if d.get('win_x') != self.win_x or d.get('win_y') != self.win_y:
-                dx = self.win_x - d.get('win_x', 0)
-                dy = self.win_y - d.get('win_y', 0)
-                self.cols_logical = [c + dx for c in self.cols_logical]
-                self.rows_logical = [r + dy for r in self.rows_logical]
-                print(f"  Window moved by ({dx},{dy}), adjusted grid")
             print(f"  Loaded calibration: cell={self.cell_w:.1f}x{self.cell_h:.1f}")
             return True
         except:
