@@ -20,11 +20,12 @@ import Quartz
 
 pyautogui.FAILSAFE = True  # Move mouse to corner to abort
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PIKAFISH = "/tmp/pikafish-src/src/pikafish"
 PIKAFISH_DIR = "/tmp/pikafish-src/src"
-TEMPLATE_DIR = "/tmp/xiangqi_templates"
-SCREENSHOT_PATH = "/tmp/xiangqi_screen.png"
-CALIB_PATH = "/tmp/xiangqi_calib.json"
+TEMPLATE_DIR = os.path.join(_SCRIPT_DIR, "templates")
+SCREENSHOT_PATH = os.path.join(_SCRIPT_DIR, "screen.png")
+CALIB_PATH = os.path.join(_SCRIPT_DIR, "calib.json")
 MOVE_TIME_MS = 500  # Fast for real games with time pressure
 
 # Initial board layouts (screen space)
@@ -65,6 +66,7 @@ class Bot:
         self.win_id = None
         self.win_x = 0
         self.win_y = 0
+        self.cnn = None  # CNN classifier (loaded on demand)
 
     # --- Window & Screenshot ---
 
@@ -87,7 +89,7 @@ class Bot:
     def screenshot_for_processing(self):
         """Capture window, return image. Uses unique filename each time."""
         self._ss_counter = getattr(self, '_ss_counter', 0) + 1
-        path = f"/tmp/xiangqi_ss_{self._ss_counter % 3}.png"
+        path = os.path.join(_SCRIPT_DIR, f"ss_{self._ss_counter % 3}.png")
         subprocess.run(['screencapture', '-x', '-o', '-l', str(self.win_id),
                         path], capture_output=True, check=True)
         full = cv2.imread(path)
@@ -1459,6 +1461,87 @@ class Bot:
             s = [(8-fc, fr), (8-tc, tr)]
         return [(self.cols_logical[c], self.rows_logical[r]) for c, r in s]
 
+    def load_cnn(self):
+        """Load CNN piece classifier if available."""
+        try:
+            from xiangqi_cnn import PieceClassifierCNN, MODEL_PATH
+            if os.path.exists(MODEL_PATH):
+                self.cnn = PieceClassifierCNN(MODEL_PATH)
+                print("  CNN model loaded!")
+                return True
+        except Exception as e:
+            print(f"  CNN not available: {e}")
+        return False
+
+    def parse_board_cnn(self, img):
+        """Parse entire board using CNN. Returns 10x9 board array."""
+        if not self.cnn:
+            return None
+        return self.cnn.parse_board(
+            img, self.cols_logical, self.rows_logical,
+            self.retina_scale, self.win_x, self.win_y,
+            self.cell_w, self.cell_h)
+
+    def detect_move_cnn(self, img, board_before, fen_before):
+        """Detect opponent's move by CNN board parsing + diff with tracked state.
+
+        Parses the entire board from a single screenshot, compares with
+        the tracked board state, and matches differences against legal moves.
+        """
+        if not self.cnn:
+            return None
+
+        parsed = self.parse_board_cnn(img)
+        if not parsed:
+            return None
+
+        # Find cells that differ between tracked and CNN-parsed board
+        diffs = []
+        for r in range(10):
+            for c in range(9):
+                old = board_before[r][c]
+                new = parsed[r][c]
+                if old != new:
+                    diffs.append((r, c, old, new))
+
+        if not diffs:
+            return None  # No change detected
+
+        # Match against legal opponent moves
+        opp_turn = 'b' if self.playing_red else 'w'
+        opp_fen = f"{fen_before} {opp_turn} - - 0 1"
+        legal_moves = self.get_legal_moves(opp_fen)
+
+        best_move = None
+        best_match = 0
+        for move in legal_moves:
+            src, dst = self.uci_to_screen_cells(move)
+            sr, sc = src[0], src[1]
+            dr, dc = dst[0], dst[1]
+            match = 0
+            # Check if src cell changed from piece to empty/different
+            for r, c, old, new in diffs:
+                if r == sr and c == sc and old is not None:
+                    match += 1
+                if r == dr and c == dc:
+                    match += 1
+            if match > best_match:
+                best_match = match
+                best_move = move
+
+        if best_move and best_match >= 1:
+            src, dst = self.uci_to_screen_cells(best_move)
+            piece = board_before[src[0]][src[1]]
+            if piece:
+                board_result = [row[:] for row in board_before]
+                board_result[src[0]][src[1]] = None
+                board_result[dst[0]][dst[1]] = piece
+                print(f"    CNN: {best_move} ({piece}) [diffs={len(diffs)}, match={best_match}]")
+                return board_result
+
+        print(f"    CNN: {len(diffs)} diffs but no legal move match")
+        return None
+
     def collect_cnn_data(self, img, board):
         """Save cell patches for CNN training (auto-labeled from tracked board)."""
         try:
@@ -1603,11 +1686,15 @@ class Bot:
         print("[4] Detecting orientation...")
         self.detect_orientation(img)
 
-        print("[5] Capturing templates...")
-        self.capture_templates(img)
+        print("[5] Loading CNN / templates...")
+        if self.load_cnn():
+            board = self.parse_board_cnn(img)
+            print("  Board parsed by CNN")
+        else:
+            self.capture_templates(img)
+            board = self.parse_board(img)
+            print("  Board parsed by template matching (no CNN)")
 
-        # Verify
-        board = self.parse_board(img)
         fen = self.board_to_fen(board)
         expected = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR"
         print(f"\n  FEN: {fen}")
@@ -1641,7 +1728,7 @@ class Bot:
         if not self.playing_red and fen == expected:
             print("  Playing BLACK — waiting for opponent's first move...")
             ref = self.crop_board_region(img)
-            for wi in range(300):  # Up to 150s
+            for wi in range(60):  # Up to 30s
                 time.sleep(0.5)
                 curr = self.screenshot_for_processing()
                 curr_crop = self.crop_board_region(curr)
@@ -1807,11 +1894,10 @@ class Bot:
 
                     # === Phase 2: Detect opponent's move ===
                     result = None
-                    detected_move = None
 
-                    # Try 1: highlight detection (most reliable)
-                    result = self.detect_move_highlight(
-                        img_settled, board, fen, our_move=best)
+                    # Try 1: CNN board parsing (most reliable, single image)
+                    if self.cnn:
+                        result = self.detect_move_cnn(img_settled, board, fen)
 
                     # Try 2: pixel diff (before → settled)
                     if result is None:
@@ -1831,7 +1917,7 @@ class Bot:
                         print("  Waiting for opponent...", end="", flush=True)
                         opp_ref = self.crop_board_region(img_settled)
                         opp_detected = False
-                        for wait_i in range(120):  # Up to 60s
+                        for wait_i in range(60):  # Up to 30s
                             time.sleep(0.5)
                             curr = self.screenshot_for_processing()
                             curr_crop = self.crop_board_region(curr)
@@ -1856,20 +1942,17 @@ class Bot:
                                         break
                                 img_opp = self.screenshot_for_processing()
                                 print(" got it!")
-                                # Highlight first
-                                result = self.detect_move_highlight(
-                                    img_opp, board, fen, our_move=best)
-                                # Pixel diff
+                                # CNN first
+                                if self.cnn:
+                                    result = self.detect_move_cnn(
+                                        img_opp, board, fen)
+                                # Pixel diff fallback
                                 if result is None:
                                     result = self.detect_move_perft(
                                         img_before_move, img_opp, board, fen)
                                 if result is None:
                                     result = self.detect_move_perft(
                                         img_settled, img_opp, board, fen)
-                                # Occupancy
-                                if result is None:
-                                    result = self.detect_move_occupancy(
-                                        img_opp, board, fen)
                                 opp_detected = True
                                 break
                             if wait_i % 10 == 0:

@@ -18,11 +18,22 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
-DATA_DIR = "/tmp/xiangqi_cnn_data"
-MODEL_PATH = "/tmp/xiangqi_cnn.pt"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(_SCRIPT_DIR, "cnn_data")
+MODEL_PATH = os.path.join(_SCRIPT_DIR, "xiangqi_cnn.pt")
 CELL_SIZE = 48  # Input size for CNN
 CLASSES = ['_', 'R', 'N', 'B', 'A', 'K', 'C', 'P', 'r', 'n', 'b', 'a', 'k', 'c', 'p']
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
+# macOS filesystem is case-insensitive, so R and r map to the same folder!
+# Use distinct folder names: red_X for uppercase, black_x for lowercase
+PIECE_TO_DIR = {
+    '_': 'empty',
+    'R': 'red_R', 'N': 'red_N', 'B': 'red_B', 'A': 'red_A',
+    'K': 'red_K', 'C': 'red_C', 'P': 'red_P',
+    'r': 'black_r', 'n': 'black_n', 'b': 'black_b', 'a': 'black_a',
+    'k': 'black_k', 'c': 'black_c', 'p': 'black_p',
+}
+DIR_TO_PIECE = {v: k for k, v in PIECE_TO_DIR.items()}
 
 
 # --- CNN Model ---
@@ -58,13 +69,13 @@ class PieceDataset(Dataset):
     def __init__(self, data_dir, transform=None):
         self.samples = []  # (path, label_idx)
         self.transform = transform
-        for cls in CLASSES:
-            cls_dir = os.path.join(data_dir, cls)
+        for piece, dirname in PIECE_TO_DIR.items():
+            cls_dir = os.path.join(data_dir, dirname)
             if not os.path.isdir(cls_dir):
                 continue
             for fname in os.listdir(cls_dir):
                 if fname.endswith('.png'):
-                    self.samples.append((os.path.join(cls_dir, fname), CLASS_TO_IDX[cls]))
+                    self.samples.append((os.path.join(cls_dir, fname), CLASS_TO_IDX[piece]))
 
     def __len__(self):
         return len(self.samples)
@@ -74,8 +85,8 @@ class PieceDataset(Dataset):
         img = cv2.imread(path)
         img = cv2.resize(img, (CELL_SIZE, CELL_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = (img / 255.0).astype('float32')
-        img = torch.FloatTensor(img.tolist()).permute(2, 0, 1)  # HWC -> CHW
+        img = img.astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1)  # HWC -> CHW
         if self.transform:
             img = self.transform(img)
         return img, label
@@ -97,15 +108,14 @@ def collect_from_screenshot(img, cols_logical, rows_logical, board, retina_scale
         session_id: Unique ID for this collection session
     """
     os.makedirs(DATA_DIR, exist_ok=True)
-    for cls in CLASSES:
-        os.makedirs(os.path.join(DATA_DIR, cls), exist_ok=True)
+    for d in PIECE_TO_DIR.values():
+        os.makedirs(os.path.join(DATA_DIR, d), exist_ok=True)
 
-    radius = int(min(cell_w, cell_h) * retina_scale * 0.38)
+    radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
     count = 0
 
     for r in range(10):
         for c in range(9):
-            # Convert logical coords to pixel coords in screenshot
             px = int((cols_logical[c] - win_x) * retina_scale)
             py = int((rows_logical[r] - win_y) * retina_scale)
 
@@ -119,12 +129,12 @@ def collect_from_screenshot(img, cols_logical, rows_logical, board, retina_scale
 
             piece = board[r][c]
             cls = piece if piece else '_'
-            if cls not in CLASS_TO_IDX:
+            if cls not in PIECE_TO_DIR:
                 continue
 
-            # Save patch
+            dirname = PIECE_TO_DIR[cls]
             fname = f"s{session_id}_r{r}c{c}.png"
-            cv2.imwrite(os.path.join(DATA_DIR, cls, fname), patch)
+            cv2.imwrite(os.path.join(DATA_DIR, dirname, fname), patch)
             count += 1
 
     return count
@@ -132,8 +142,8 @@ def collect_from_screenshot(img, cols_logical, rows_logical, board, retina_scale
 
 def augment_data():
     """Apply augmentation to existing training data."""
-    for cls in CLASSES:
-        cls_dir = os.path.join(DATA_DIR, cls)
+    for dirname in PIECE_TO_DIR.values():
+        cls_dir = os.path.join(DATA_DIR, dirname)
         if not os.path.isdir(cls_dir):
             continue
         files = [f for f in os.listdir(cls_dir) if f.endswith('.png') and '_aug' not in f]
@@ -168,11 +178,11 @@ def train(epochs=30, batch_size=32, lr=0.001):
     # Count samples per class
     print("Dataset:")
     total = 0
-    for cls in CLASSES:
-        cls_dir = os.path.join(DATA_DIR, cls)
+    for piece, dirname in PIECE_TO_DIR.items():
+        cls_dir = os.path.join(DATA_DIR, dirname)
         n = len([f for f in os.listdir(cls_dir) if f.endswith('.png')]) if os.path.isdir(cls_dir) else 0
         total += n
-        print(f"  {cls}: {n}")
+        print(f"  {piece} ({dirname}): {n}")
     print(f"  Total: {total}")
 
     if total < 50:
@@ -257,7 +267,7 @@ class PieceClassifierCNN:
         """Classify a single cell patch. Returns (piece_char_or_None, confidence)."""
         img = cv2.resize(patch, (CELL_SIZE, CELL_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        tensor = torch.FloatTensor(img.tolist()).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             logits = self.model(tensor)
@@ -270,7 +280,7 @@ class PieceClassifierCNN:
     def parse_board(self, img, cols_logical, rows_logical, retina_scale, win_x, win_y,
                     cell_w, cell_h):
         """Parse entire board from a single screenshot. Returns 10x9 board array."""
-        radius = int(min(cell_w, cell_h) * retina_scale * 0.38)
+        radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
         board = [[None] * 9 for _ in range(10)]
 
         for r in range(10):
@@ -314,8 +324,8 @@ if __name__ == '__main__':
         bot.detect_orientation(img)
 
         board = INIT_RED if bot.playing_red else INIT_BLACK
-        session_id = len(os.listdir(os.path.join(DATA_DIR, '_'))) if os.path.isdir(
-            os.path.join(DATA_DIR, '_')) else 0
+        empty_dir = os.path.join(DATA_DIR, 'empty')
+        session_id = len(os.listdir(empty_dir)) if os.path.isdir(empty_dir) else 0
 
         n = collect_from_screenshot(
             img, bot.cols_logical, bot.rows_logical, board,
