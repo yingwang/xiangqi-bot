@@ -1695,13 +1695,33 @@ class Bot:
             board = self.parse_board(img)
             print("  Board parsed by template matching (no CNN)")
 
+        # Fix obvious CNN misclassifications (wrong color pawn behind river)
+        if self.cnn:
+            for r in range(10):
+                for c in range(9):
+                    p = board[r][c]
+                    if p not in ('P', 'p'):
+                        continue
+                    if self.playing_red:
+                        # Rows 0-3 = opponent territory, rows 6-9 = our territory
+                        if p == 'P' and r <= 3:
+                            board[r][c] = 'p'; print(f"  CNN fix: ({r},{c}) P→p")
+                        elif p == 'p' and r >= 6:
+                            board[r][c] = 'P'; print(f"  CNN fix: ({r},{c}) p→P")
+                    else:
+                        # Rows 0-3 = opponent (red) territory, rows 6-9 = our territory
+                        if p == 'p' and r <= 3:
+                            board[r][c] = 'P'; print(f"  CNN fix: ({r},{c}) p→P")
+                        elif p == 'P' and r >= 6:
+                            board[r][c] = 'p'; print(f"  CNN fix: ({r},{c}) P→p")
+
         fen = self.board_to_fen(board)
         expected = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR"
         print(f"\n  FEN: {fen}")
         if fen == expected:
             print("  ✓ Initial position!")
         else:
-            print("  ⚠ Not initial position")
+            print("  ⚠ Not initial position (game already started)")
 
         # Print board
         for r in range(10):
@@ -1790,7 +1810,7 @@ class Bot:
 
                     if not best or best == '(none)':
                         print(f"No move! FEN was: {full_fen}")
-                        print("Retrying parse...")
+                        print("Re-parsing board...")
                         time.sleep(1)
                         img = self.screenshot_for_processing()
                         if self.cnn:
@@ -1798,9 +1818,9 @@ class Bot:
                         else:
                             board = self.parse_board(img)
                         fen = self.board_to_fen(board)
-                        start_fen = f"{fen} {turn} - - 0 1"
                         move_history = []
-                        print(f"  Retry FEN: {fen}")
+                        start_fen = f"{fen} {turn} - - 0 1"
+                        print(f"  Re-parsed FEN: {fen}")
                         continue
 
                     n += 1
