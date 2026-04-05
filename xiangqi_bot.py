@@ -1783,19 +1783,36 @@ class Bot:
                     if not click_ok:
                         click_fail_count += 1
                         if click_fail_count >= 2:
-                            # FEN probably drifted — move is illegal on real board
-                            print("  ⚠ Click failed 2x in a row! Re-parsing board...")
-                            time.sleep(1)
+                            # Likely not our turn, or FEN drifted
+                            print("  ⚠ Click failed 2x! Waiting for board change...")
+                            ref_crop = self.crop_board_region(
+                                self.screenshot_for_processing())
+                            changed = False
+                            for wi in range(60):  # Up to 30s
+                                time.sleep(0.5)
+                                curr = self.screenshot_for_processing()
+                                if self.images_changed(ref_crop,
+                                        self.crop_board_region(curr)):
+                                    # Board changed — wait for animation
+                                    time.sleep(1.5)
+                                    changed = True
+                                    break
+                                if wi % 10 == 0:
+                                    sys.stdout.write(".")
+                                    sys.stdout.flush()
+                            # Re-parse with CNN
                             img_fresh = self.screenshot_for_processing()
-                            self.capture_templates(img_fresh)
-                            board = self.parse_board(img_fresh)
+                            if self.cnn:
+                                board = self.parse_board_cnn(img_fresh)
+                            else:
+                                board = self.parse_board(img_fresh)
                             fen = self.board_to_fen(board)
                             click_fail_count = 0
-                            move_history = []  # Reset history
+                            move_history = []
                             start_fen = f"{fen} {turn} - - 0 1"
-                            print(f"  Re-parsed → {fen}")
+                            print(f"\n  Re-parsed → {fen}")
                         else:
-                            print("  ⚠ Click failed! Retrying move...")
+                            print("  ⚠ Click failed! Retrying...")
                         time.sleep(1.0)
                         continue
 
