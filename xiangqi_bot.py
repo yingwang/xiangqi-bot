@@ -1747,242 +1747,123 @@ class Bot:
                 line += f" {p}" if p else " ."
             print(line)
 
-        # Game loop — supports starting from any position
+        # === CNN-driven game loop ===
+        # Simple: poll board with CNN, detect changes, react
         turn = "w" if self.playing_red else "b"
-        my_turn = True  # Default: it's our turn. Start playing immediately.
-        prev_img = img
-        prev_snap = self.crop_board_region(img)
         n = 0
-        start_fen = f"{fen} {turn} - - 0 1"
-        move_history = []
-        fen_history = []
+        last_fen = fen
         self._cnn_session = int(time.time())
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
-        click_fail_count = 0
-
         while True:
             try:
-                if my_turn:
-                    full_fen = f"{fen} {turn} - - 0 1"
-                    fen_history.append(fen)
-                    rep_count = fen_history.count(fen)
-                    if rep_count >= 3:
-                        print(f"  ⚠ Position repeated {rep_count}x!")
-                    print(f"  FEN → Pikafish: {full_fen}")
-                    t0 = time.time()
-                    best, info = self.pikafish(start_fen, move_history)
-                    dt = time.time() - t0
+                # Step 1: Ask pikafish for best move
+                full_fen = f"{fen} {turn} - - 0 1"
+                print(f"  FEN → Pikafish: {full_fen}")
+                best, info = self.pikafish(full_fen)
 
-                    if not best or best == '(none)':
-                        print(f"No move! FEN: {full_fen}")
-                        print("  Re-parsing board...")
-                        time.sleep(2)
-                        img = self.screenshot_for_processing()
-                        if self.cnn:
-                            board = self.parse_board_cnn(img)
-                        else:
-                            board = self.parse_board(img)
-                        fen = self.board_to_fen(board)
-                        move_history = []
-                        start_fen = f"{fen} {turn} - - 0 1"
-                        print(f"  Re-parsed FEN: {fen}")
-                        continue
+                if not best or best == '(none)':
+                    # Invalid FEN — re-parse board
+                    print(f"  No move! Re-parsing...")
+                    time.sleep(2)
+                    img = self.screenshot_for_processing()
+                    board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
+                    fen = self.board_to_fen(board)
+                    continue
 
-                    n += 1
-                    sc = self.score_str(info)
-                    print(f"[{n}] {best} ({sc}) [{dt:.1f}s]")
+                n += 1
+                sc = self.score_str(info)
+                print(f"[{n}] {best} ({sc})")
 
-                    pts = self.uci_to_logical(best)
-                    print(f"  Click: ({pts[0][0]:.0f},{pts[0][1]:.0f}) → ({pts[1][0]:.0f},{pts[1][1]:.0f})")
+                # Step 2: Click our move (with retry)
+                pts = self.uci_to_logical(best)
+                before_crop = self.crop_board_region(self.screenshot_for_processing())
 
-                    # Capture BEFORE clicking (baseline for detection)
-                    img_before_move = self.screenshot_for_processing()
-                    before_crop = self.crop_board_region(img_before_move)
+                click_ok = False
+                for click_try in range(3):
+                    self.activate_window()
+                    time.sleep(0.3)
+                    self.click(pts[0][0], pts[0][1])
+                    time.sleep(0.8)
+                    self.click(pts[1][0], pts[1][1])
+                    time.sleep(1.0)
+                    check = self.crop_board_region(self.screenshot_for_processing())
+                    if self.images_changed(before_crop, check):
+                        click_ok = True
+                        break
+                    if click_try < 2:
+                        print(f"  Click retry {click_try+1}...")
 
-                    # Click with retry — sometimes CGEvent clicks don't register
-                    click_ok = False
-                    for click_try in range(5):
-                        self.activate_window()
+                if not click_ok:
+                    # Click failed — might not be our turn or illegal move
+                    # Wait for board to change, then re-parse
+                    print("  Click failed — waiting for board change...")
+                    ref = self.crop_board_region(self.screenshot_for_processing())
+                    for wi in range(60):
                         time.sleep(0.5)
-                        self.click(pts[0][0], pts[0][1])
-                        time.sleep(1.0)
-                        self.click(pts[1][0], pts[1][1])
-                        time.sleep(1.2)
-                        # Verify click registered
-                        check = self.crop_board_region(
-                            self.screenshot_for_processing())
-                        if self.images_changed(before_crop, check):
-                            click_ok = True
-                            click_fail_count = 0
+                        curr = self.screenshot_for_processing()
+                        if self.images_changed(ref, self.crop_board_region(curr)):
+                            time.sleep(1.5)
                             break
-                        if click_try < 4:
-                            print(f"  Click retry {click_try+1}...")
-                            time.sleep(1.0)
-
-                    if not click_ok:
-                        click_fail_count += 1
-                        if click_fail_count >= 2:
-                            # Likely not our turn, or FEN drifted
-                            print("  ⚠ Click failed 2x! Waiting for board change...")
-                            ref_crop = self.crop_board_region(
-                                self.screenshot_for_processing())
-                            changed = False
-                            for wi in range(60):  # Up to 30s
-                                time.sleep(0.5)
-                                curr = self.screenshot_for_processing()
-                                if self.images_changed(ref_crop,
-                                        self.crop_board_region(curr)):
-                                    # Board changed — wait for animation
-                                    time.sleep(1.5)
-                                    changed = True
-                                    break
-                                if wi % 10 == 0:
-                                    sys.stdout.write(".")
-                                    sys.stdout.flush()
-                            # Re-parse with CNN
-                            img_fresh = self.screenshot_for_processing()
-                            if self.cnn:
-                                board = self.parse_board_cnn(img_fresh)
-                            else:
-                                board = self.parse_board(img_fresh)
-                            fen = self.board_to_fen(board)
-                            click_fail_count = 0
-                            move_history = []
-                            start_fen = f"{fen} {turn} - - 0 1"
-                            print(f"\n  Re-parsed → {fen}")
-                        else:
-                            print("  ⚠ Click failed! Retrying...")
-                        time.sleep(1.0)
-                        continue
-
-                    # === Phase 1: Wait for animations to settle ===
-                    print("  Settling...", end="", flush=True)
-                    prev_check = self.crop_board_region(self.screenshot_for_processing())
-                    stable = 0
-                    for wait_i in range(25):
-                        time.sleep(0.5)
-                        curr_check = self.crop_board_region(self.screenshot_for_processing())
-                        if self.images_changed(prev_check, curr_check):
-                            stable = 0
-                            sys.stdout.write("~")
-                        else:
-                            stable += 1
+                        if wi % 20 == 0 and wi > 0:
                             sys.stdout.write(".")
-                        sys.stdout.flush()
-                        prev_check = curr_check
-                        if stable >= 3 and wait_i >= 3:
-                            break
-                    img_settled = self.screenshot_for_processing()
-                    print()
+                            sys.stdout.flush()
+                    # Re-parse entire board with CNN
+                    img = self.screenshot_for_processing()
+                    board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
+                    fen = self.board_to_fen(board)
+                    print(f"  Re-parsed → {fen}")
+                    continue
 
-                    # Update board by applying our known move (100% accurate)
-                    fc, fr = ord(best[0]) - ord('a'), int(best[1])
-                    tc, tr = ord(best[2]) - ord('a'), int(best[3])
-                    if self.playing_red:
-                        sr1, sc1 = 9 - fr, fc
-                        sr2, sc2 = 9 - tr, tc
+                # Step 3: Wait for animations + opponent response
+                print("  Waiting...", end="", flush=True)
+                prev_check = self.crop_board_region(self.screenshot_for_processing())
+                # Wait until board settles after our move
+                stable = 0
+                for wi in range(20):
+                    time.sleep(0.5)
+                    curr_check = self.crop_board_region(self.screenshot_for_processing())
+                    if self.images_changed(prev_check, curr_check):
+                        stable = 0
                     else:
-                        sr1, sc1 = fr, 8 - fc
-                        sr2, sc2 = tr, 8 - tc
-                    board[sr2][sc2] = board[sr1][sc1]
-                    board[sr1][sc1] = None
-                    fen = self.board_to_fen(board)
-                    move_history.append(best)
-                    self.collect_cnn_data(img_settled, board)  # Collect training data
-                    print(f"  After our move: {fen}")
-
-                    # Check if game is over
-                    opp_turn = 'b' if self.playing_red else 'w'
-                    opp_fen = f"{fen} {opp_turn} - - 0 1"
-                    legal = self.get_legal_moves(opp_fen)
-                    if not legal:
-                        print(f"\n  ★ CHECKMATE! We win in {n} moves! ★")
+                        stable += 1
+                    prev_check = curr_check
+                    if stable >= 3:
                         break
 
-                    # === Phase 2: Detect opponent's move ===
-                    result = None
-
-                    # Try 1: CNN board parsing (most reliable, single image)
-                    if self.cnn:
-                        result = self.detect_move_cnn(img_settled, board, fen)
-
-                    # Try 2: pixel diff (before → settled)
-                    if result is None:
-                        d1 = cv2.absdiff(img_before_move, img_settled).mean()
-                        print(f"  Diff before→settled: {d1:.1f}")
-                        if d1 > 0.1:
-                            result = self.detect_move_perft(
-                                img_before_move, img_settled, board, fen)
-
-                    # Try 3: single-image occupancy
-                    if result is None:
-                        result = self.detect_move_occupancy(
-                            img_settled, board, fen)
-
-                    # Try 4: opponent hasn't moved yet — wait for response
-                    if result is None:
-                        print("  Waiting for opponent...", end="", flush=True)
-                        opp_ref = self.crop_board_region(img_settled)
-                        opp_detected = False
-                        for wait_i in range(60):  # Up to 30s
+                # Now wait for opponent's response (board changes again)
+                opp_ref = self.crop_board_region(self.screenshot_for_processing())
+                for wi in range(120):  # Up to 60s
+                    time.sleep(0.5)
+                    curr = self.screenshot_for_processing()
+                    if self.images_changed(opp_ref, self.crop_board_region(curr)):
+                        sys.stdout.write("!")
+                        # Wait for their animation to settle
+                        time.sleep(1.0)
+                        ps = self.crop_board_region(self.screenshot_for_processing())
+                        s = 0
+                        for j in range(15):
                             time.sleep(0.5)
-                            curr = self.screenshot_for_processing()
-                            curr_crop = self.crop_board_region(curr)
-                            if self.images_changed(opp_ref, curr_crop):
-                                sys.stdout.write("!")
-                                sys.stdout.flush()
-                                # Opponent moved! Wait for animation
-                                time.sleep(1.0)
-                                ps = self.crop_board_region(
-                                    self.screenshot_for_processing())
+                            cs = self.crop_board_region(self.screenshot_for_processing())
+                            if not self.images_changed(ps, cs):
+                                s += 1
+                            else:
                                 s = 0
-                                for j in range(20):
-                                    time.sleep(0.5)
-                                    cs = self.crop_board_region(
-                                        self.screenshot_for_processing())
-                                    if not self.images_changed(ps, cs):
-                                        s += 1
-                                    else:
-                                        s = 0
-                                    ps = cs
-                                    if s >= 3:
-                                        break
-                                img_opp = self.screenshot_for_processing()
-                                print(" got it!")
-                                # CNN first
-                                if self.cnn:
-                                    result = self.detect_move_cnn(
-                                        img_opp, board, fen)
-                                # Pixel diff fallback
-                                if result is None:
-                                    result = self.detect_move_perft(
-                                        img_before_move, img_opp, board, fen)
-                                if result is None:
-                                    result = self.detect_move_perft(
-                                        img_settled, img_opp, board, fen)
-                                opp_detected = True
+                            ps = cs
+                            if s >= 3:
                                 break
-                            if wait_i % 10 == 0:
-                                sys.stdout.write(".")
-                                sys.stdout.flush()
-                        if not opp_detected:
-                            print(" timeout!")
-
-                    if result is None:
-                        print(f"  ⚠ Could not detect opponent move. Stopping.")
                         break
+                    if wi % 20 == 0:
+                        sys.stdout.write(".")
+                    sys.stdout.flush()
+                print(" done")
 
-                    # Track opponent's move in history
-                    old_fen = fen
-                    board = result
-                    fen = self.board_to_fen(board)
-                    # Reconstruct opponent's UCI move for history
-                    opp_move = self._find_move(old_fen, fen)
-                    if opp_move:
-                        move_history.append(opp_move)
-                    print(f"  Opponent → {fen}")
+                # Step 4: Re-parse entire board with CNN (no tracking needed!)
+                img = self.screenshot_for_processing()
+                board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
+                fen = self.board_to_fen(board)
+                print(f"  Board → {fen}")
 
             except KeyboardInterrupt:
                 print("\nStopped."); break
