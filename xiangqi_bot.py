@@ -1865,6 +1865,12 @@ class Bot:
                 board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
                 fen = self.board_to_fen(board)
                 print(f"  Board → {fen}")
+                for r in range(10):
+                    line = "  "
+                    for c in range(9):
+                        p = board[r][c]
+                        line += f" {p}" if p else " ."
+                    print(line)
 
             except KeyboardInterrupt:
                 print("\nStopped."); break
