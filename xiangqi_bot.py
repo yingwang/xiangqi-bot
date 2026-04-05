@@ -1459,6 +1459,19 @@ class Bot:
             s = [(8-fc, fr), (8-tc, tr)]
         return [(self.cols_logical[c], self.rows_logical[r]) for c, r in s]
 
+    def collect_cnn_data(self, img, board):
+        """Save cell patches for CNN training (auto-labeled from tracked board)."""
+        try:
+            from xiangqi_cnn import collect_from_screenshot
+            session = getattr(self, '_cnn_session', 0)
+            n = collect_from_screenshot(
+                img, self.cols_logical, self.rows_logical, board,
+                self.retina_scale, self.win_x, self.win_y,
+                self.cell_w, self.cell_h, session)
+            self._cnn_session += 1
+        except Exception:
+            pass  # Don't let data collection break the game
+
     def activate_window(self):
         """Bring WeChat to front and focus the specific mini-program window."""
         subprocess.run(['osascript', '-e',
@@ -1620,6 +1633,7 @@ class Bot:
         start_fen = f"{fen} {turn} - - 0 1"
         move_history = []  # UCI moves for repetition detection
         fen_history = []   # FEN strings to detect repetition
+        self._cnn_session = int(time.time())  # For CNN data collection
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
@@ -1780,6 +1794,7 @@ class Bot:
                     board[sr1][sc1] = None
                     fen = self.board_to_fen(board)
                     move_history.append(best)
+                    self.collect_cnn_data(img_settled, board)  # Collect training data
                     print(f"  After our move: {fen}")
 
                     # Check if game is over
