@@ -21,8 +21,8 @@ import Quartz
 pyautogui.FAILSAFE = True  # Move mouse to corner to abort
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PIKAFISH = "/tmp/pikafish-src/src/pikafish"
-PIKAFISH_DIR = "/tmp/pikafish-src/src"
+PIKAFISH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pikafish")
+PIKAFISH_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(_SCRIPT_DIR, "templates")
 SCREENSHOT_PATH = os.path.join(_SCRIPT_DIR, "screen.png")
 CALIB_PATH = os.path.join(_SCRIPT_DIR, "calib.json")
@@ -1506,13 +1506,73 @@ class Bot:
         return False
 
     def parse_board_cnn(self, img):
-        """Parse entire board using CNN. Returns 10x9 board array."""
+        """Parse entire board using CNN with double-shot for low confidence cells.
+
+        Takes a second screenshot after a short delay and averages probability
+        distributions to reduce animation artifacts.
+        """
         if not self.cnn:
             return None
-        return self.cnn.parse_board(
+        debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
+        step = getattr(self, '_debug_step', 0)
+        self._debug_step = step + 1
+        debug_prefix = f"s{step:03d}_"
+
+        # First pass
+        board = self.cnn.parse_board(
             img, self.cols_logical, self.rows_logical,
             self.retina_scale, self.win_x, self.win_y,
-            self.cell_w, self.cell_h)
+            self.cell_w, self.cell_h, debug_dir=debug_dir,
+            debug_prefix=debug_prefix)
+
+        # Check if any non-empty cell has low confidence
+        LOW_CONF = 0.90
+        needs_retry = False
+        for r in range(10):
+            for c in range(9):
+                if board[r][c] is not None and self.cnn._cell_probs[r][c] is not None:
+                    conf = float(self.cnn._cell_probs[r][c].max())
+                    if conf < LOW_CONF:
+                        needs_retry = True
+                        break
+            if needs_retry:
+                break
+
+        if needs_retry:
+            import numpy as np
+            probs1 = [[p.copy() if p is not None else None for p in row]
+                      for row in self.cnn._cell_probs]
+            time.sleep(0.3)
+            img2 = self.screenshot_for_processing()
+            board = self.cnn.parse_board(
+                img2, self.cols_logical, self.rows_logical,
+                self.retina_scale, self.win_x, self.win_y,
+                self.cell_w, self.cell_h, debug_dir=debug_dir,
+                debug_prefix=f"s{step:03d}b_")
+
+            # Average probabilities for low-confidence cells
+            from xiangqi_cnn import CLASSES
+            changes = 0
+            for r in range(10):
+                for c in range(9):
+                    p1 = probs1[r][c]
+                    p2 = self.cnn._cell_probs[r][c]
+                    if p1 is None or p2 is None:
+                        continue
+                    if float(p1.max()) < LOW_CONF or float(p2.max()) < LOW_CONF:
+                        avg = (p1 + p2) / 2
+                        pred = int(avg.argmax())
+                        cls = CLASSES[pred]
+                        new_piece = None if cls == '_' else cls
+                        if new_piece != board[r][c]:
+                            changes += 1
+                        board[r][c] = new_piece
+                        self.cnn._cell_probs[r][c] = avg
+            if changes:
+                print(f"    Double-shot: corrected {changes} cell(s)")
+                board = self.cnn._validate_board(board)
+
+        return board
 
     def detect_move_cnn(self, img, board_before, fen_before):
         """Detect opponent's move by CNN board parsing + diff with tracked state.
@@ -1762,6 +1822,13 @@ class Bot:
 
         fen_history = {}  # fen -> last_move, to avoid repetition
         excluded_moves = []  # moves to exclude if position repeats
+        # Clean up old debug data
+        import shutil
+        dbg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
+        if os.path.exists(dbg_root):
+            shutil.rmtree(dbg_root)
+        self._debug_step = 0
+        print(f"  Debug patches dir: {dbg_root}")
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
@@ -1819,8 +1886,7 @@ class Bot:
                         print(f"  Click retry {click_try+1}...")
 
                 if not click_ok:
-                    # Click failed — might not be our turn or illegal move
-                    # Wait for board to change, then re-parse
+                    # Click failed — wait for board change, then re-parse
                     print("  Click failed — waiting for board change...")
                     ref = self.crop_board_region(self.screenshot_for_processing())
                     for wi in range(60):

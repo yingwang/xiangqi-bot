@@ -35,6 +35,12 @@ PIECE_TO_DIR = {
 }
 DIR_TO_PIECE = {v: k for k, v in PIECE_TO_DIR.items()}
 
+# Max piece counts per side (xiangqi rules)
+PIECE_LIMITS = {
+    'K': 1, 'R': 2, 'N': 2, 'B': 2, 'A': 2, 'C': 2, 'P': 5,
+    'k': 1, 'r': 2, 'n': 2, 'b': 2, 'a': 2, 'c': 2, 'p': 5,
+}
+
 
 # --- CNN Model ---
 
@@ -75,7 +81,9 @@ class PieceDataset(Dataset):
                 continue
             for fname in os.listdir(cls_dir):
                 if fname.endswith('.png'):
-                    self.samples.append((os.path.join(cls_dir, fname), CLASS_TO_IDX[piece]))
+                    path = os.path.join(cls_dir, fname)
+                    if os.path.isfile(path):
+                        self.samples.append((path, CLASS_TO_IDX[piece]))
 
     def __len__(self):
         return len(self.samples)
@@ -83,6 +91,9 @@ class PieceDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         img = cv2.imread(path)
+        if img is None:
+            # Return a blank image for corrupt/missing files
+            img = np.zeros((CELL_SIZE, CELL_SIZE, 3), dtype=np.uint8)
         img = cv2.resize(img, (CELL_SIZE, CELL_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
@@ -282,23 +293,43 @@ class PieceClassifierCNN:
 
     def classify_cell(self, patch):
         """Classify a single cell patch. Returns (piece_char_or_None, confidence)."""
+        piece, conf, _ = self._classify_cell_full(patch)
+        return piece, conf
+
+    def _classify_cell_full(self, patch):
+        """Classify with full probability distribution. Returns (piece, conf, probs_array)."""
         img = cv2.resize(patch, (CELL_SIZE, CELL_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             logits = self.model(tensor)
-            probs = torch.softmax(logits, dim=1)
-            conf, pred = probs.max(1)
+            probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
 
-        cls = CLASSES[pred.item()]
-        return (None if cls == '_' else cls), conf.item()
+        pred = int(probs.argmax())
+        cls = CLASSES[pred]
+        return (None if cls == '_' else cls), float(probs[pred]), probs
 
     def parse_board(self, img, cols_logical, rows_logical, retina_scale, win_x, win_y,
-                    cell_w, cell_h):
-        """Parse entire board from a single screenshot. Returns 10x9 board array."""
+                    cell_w, cell_h, debug_dir=None, debug_prefix=None):
+        """Parse entire board from a single screenshot. Returns 10x9 board array.
+
+        Args:
+            debug_dir: If set, save each cell patch to this directory for review.
+            debug_prefix: Filename prefix for debug patches (e.g. "s001_").
+        """
         radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
         board = [[None] * 9 for _ in range(10)]
+        self._cell_probs = [[None] * 9 for _ in range(10)]
+        self._cell_patches = [[None] * 9 for _ in range(10)]
+
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+            # Create subdirectories for each piece type
+            for piece_dir in PIECE_TO_DIR.values():
+                os.makedirs(os.path.join(debug_dir, piece_dir), exist_ok=True)
+
+        prefix = debug_prefix or ""
 
         for r in range(10):
             for c in range(9):
@@ -312,9 +343,68 @@ class PieceClassifierCNN:
                 if patch.shape[0] < 20 or patch.shape[1] < 20:
                     continue
 
-                piece, conf = self.classify_cell(patch)
+                piece, conf, probs = self._classify_cell_full(patch)
                 board[r][c] = piece
+                self._cell_probs[r][c] = probs
+                self._cell_patches[r][c] = patch
 
+                if debug_dir:
+                    label = piece if piece else '_'
+                    subdir = PIECE_TO_DIR[label]
+                    fname = f"{prefix}r{r}c{c}_{conf*100:.0f}.png"
+                    cv2.imwrite(os.path.join(debug_dir, subdir, fname), patch)
+
+        board = self._validate_board(board)
+        return board
+
+    def _validate_board(self, board):
+        """Fix impossible piece counts by reassigning excess to next-best class."""
+        # Count pieces with their positions and confidences
+        piece_cells = {}  # piece -> [(r, c, conf)]
+        for r in range(10):
+            for c in range(9):
+                p = board[r][c]
+                if p is None or self._cell_probs[r][c] is None:
+                    continue
+                conf = float(self._cell_probs[r][c][CLASS_TO_IDX[p]])
+                piece_cells.setdefault(p, []).append((r, c, conf))
+
+        changes = 0
+        for piece, limit in PIECE_LIMITS.items():
+            cells = piece_cells.get(piece, [])
+            if len(cells) <= limit:
+                continue
+
+            # Too many — sort by confidence desc, reassign the weakest ones
+            cells.sort(key=lambda x: x[2], reverse=True)
+            excess = cells[limit:]
+
+            for r, c, conf in excess:
+                probs = self._cell_probs[r][c]
+                # Try alternatives in probability order
+                for idx in np.argsort(probs)[::-1]:
+                    alt_cls = CLASSES[idx]
+                    alt_piece = None if alt_cls == '_' else alt_cls
+                    if alt_piece == piece:
+                        continue
+                    # Check this alternative is within limits
+                    if alt_piece is not None:
+                        alt_count = len(piece_cells.get(alt_piece, []))
+                        if alt_count >= PIECE_LIMITS.get(alt_piece, 99):
+                            continue
+                    # Accept
+                    old_label = board[r][c]
+                    board[r][c] = alt_piece
+                    alt_conf = float(probs[idx])
+                    print(f"    FEN fix: ({r},{c}) {old_label}→{alt_piece or '.'} "
+                          f"(conf {conf:.0%}→{alt_conf:.0%})")
+                    if alt_piece:
+                        piece_cells.setdefault(alt_piece, []).append((r, c, alt_conf))
+                    changes += 1
+                    break
+
+        if changes:
+            print(f"    FEN validation: corrected {changes} cell(s)")
         return board
 
 
