@@ -25,7 +25,7 @@ PIKAFISH_DIR = "/tmp/pikafish-src/src"
 TEMPLATE_DIR = "/tmp/xiangqi_templates"
 SCREENSHOT_PATH = "/tmp/xiangqi_screen.png"
 CALIB_PATH = "/tmp/xiangqi_calib.json"
-MOVE_TIME_MS = 1000
+MOVE_TIME_MS = 500  # Fast for real games with time pressure
 
 # Initial board layouts (screen space)
 INIT_RED = [
@@ -1621,7 +1621,58 @@ class Bot:
         move_history = []  # UCI moves for repetition detection
         fen_history = []   # FEN strings to detect repetition
 
-        print(f"\n--- Game loop (Ctrl+C to stop) ---\n")
+        print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
+
+        # If playing BLACK at initial position, wait for opponent's first move
+        if not self.playing_red and fen == expected:
+            print("  Playing BLACK — waiting for opponent's first move...")
+            ref = self.crop_board_region(img)
+            for wi in range(300):  # Up to 150s
+                time.sleep(0.5)
+                curr = self.screenshot_for_processing()
+                curr_crop = self.crop_board_region(curr)
+                if self.images_changed(ref, curr_crop):
+                    # Board changed, wait for animation
+                    time.sleep(1.5)
+                    ps = self.crop_board_region(self.screenshot_for_processing())
+                    s = 0
+                    for j in range(20):
+                        time.sleep(0.5)
+                        cs = self.crop_board_region(self.screenshot_for_processing())
+                        if not self.images_changed(ps, cs):
+                            s += 1
+                        else:
+                            s = 0
+                        ps = cs
+                        if s >= 3:
+                            break
+                    img_opp = self.screenshot_for_processing()
+                    print("  Opponent moved!")
+                    # Detect their move
+                    result = self.detect_move_highlight(img_opp, board, fen)
+                    if result is None:
+                        result = self.detect_move_perft(img, img_opp, board, fen)
+                    if result is None:
+                        result = self.detect_move_occupancy(img_opp, board, fen)
+                    if result is not None:
+                        opp_move = self._find_move(fen, self.board_to_fen(result))
+                        if opp_move:
+                            move_history.append(opp_move)
+                        board = result
+                        fen = self.board_to_fen(board)
+                        print(f"  Opponent → {fen}")
+                    else:
+                        print("  ⚠ Could not detect first move, re-parsing...")
+                        board = self.parse_board(img_opp)
+                        fen = self.board_to_fen(board)
+                        print(f"  Re-parsed → {fen}")
+                    break
+                if wi % 20 == 0 and wi > 0:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+            my_turn = True
+
+        click_fail_count = 0  # Track consecutive click failures for FEN recovery
 
         while True:
             try:
@@ -1671,15 +1722,30 @@ class Bot:
                             self.screenshot_for_processing())
                         if self.images_changed(before_crop, check):
                             click_ok = True
+                            click_fail_count = 0
                             break
                         if click_try < 4:
                             print(f"  Click retry {click_try+1}...")
                             time.sleep(1.0)
 
                     if not click_ok:
-                        print("  ⚠ Click failed after 5 retries! Retrying move...")
-                        time.sleep(2.0)
-                        continue  # Re-query pikafish, retry same position
+                        click_fail_count += 1
+                        if click_fail_count >= 2:
+                            # FEN probably drifted — move is illegal on real board
+                            print("  ⚠ Click failed 2x in a row! Re-parsing board...")
+                            time.sleep(1)
+                            img_fresh = self.screenshot_for_processing()
+                            self.capture_templates(img_fresh)
+                            board = self.parse_board(img_fresh)
+                            fen = self.board_to_fen(board)
+                            click_fail_count = 0
+                            move_history = []  # Reset history
+                            start_fen = f"{fen} {turn} - - 0 1"
+                            print(f"  Re-parsed → {fen}")
+                        else:
+                            print("  ⚠ Click failed! Retrying move...")
+                        time.sleep(1.0)
+                        continue
 
                     # === Phase 1: Wait for animations to settle ===
                     print("  Settling...", end="", flush=True)
