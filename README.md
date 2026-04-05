@@ -1,18 +1,31 @@
 # Xiangqi Bot
 
-Auto-play Chinese chess (天天象棋) on macOS using Pikafish engine + screen automation.
+Auto-play Chinese chess (天天象棋) on macOS using Pikafish engine + CNN vision + screen automation.
 
 ## How it works
 
 1. **Pikafish** (~3000 Elo) calculates the best move
-2. **screencapture** reads the board from the WeChat mini program window
-3. **Quartz CGEvent** clicks to execute moves
-4. **Perft enumeration** detects opponent moves by scoring pixel changes against all legal moves
+2. **CNN classifier** (PyTorch, 15-class, 100% accuracy) identifies pieces on the board from a single screenshot
+3. **screencapture** reads the board from the WeChat mini program window
+4. **Quartz CGEvent** clicks to execute moves
+5. **Move detection** compares CNN-parsed board state against tracked state to find opponent's move
+
+## Architecture
+
+```
+Screenshot → CNN parse board → Compare with tracked state → Detect opponent move
+                                                          ↓
+                              Pikafish best move ← Current FEN
+                                                          ↓
+                              CGEvent click → Execute move
+```
+
+Detection priority: CNN > pixel diff > occupancy analysis > wait for opponent
 
 ## Requirements
 
 - macOS with WeChat (天天象棋 mini program)
-- Python 3 with `opencv-python`, `numpy`, `pyautogui`
+- Python 3 with `opencv-python`, `numpy`, `pyautogui`, `torch`, `torchvision`
 - [Pikafish](https://github.com/official-pikafish/Pikafish) compiled locally
 
 ## Setup
@@ -28,6 +41,30 @@ Auto-play Chinese chess (天天象棋) on macOS using Pikafish engine + screen a
 python3 xiangqi_bot.py
 ```
 
-## Status
+Supports both red and black sides. When playing black, the bot waits for the opponent's first move before starting.
 
-Work in progress. The bot can play 10-20+ moves automatically with Pikafish-level strength. Opponent move detection is ~80% accurate; captures and fast opponent responses can cause detection failures.
+## CNN Training
+
+Training data is auto-collected during gameplay. To retrain:
+
+```bash
+# Collect from initial position
+python3 xiangqi_cnn.py collect
+
+# Augment data (brightness, shift, rotation)
+python3 xiangqi_cnn.py augment
+
+# Train (uses MPS on Apple Silicon)
+python3 xiangqi_cnn.py train --epochs 40
+
+# Test on current board
+python3 xiangqi_cnn.py test
+```
+
+## Files
+
+- `xiangqi_bot.py` - Main bot script
+- `xiangqi_cnn.py` - CNN model, training, and inference
+- `xiangqi_cnn.pt` - Trained model weights
+- `cnn_data/` - Training data (organized by piece type: `red_R/`, `black_r/`, `empty/`, etc.)
+- `calib.json` - Grid calibration data
