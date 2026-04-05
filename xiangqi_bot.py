@@ -1695,33 +1695,8 @@ class Bot:
             board = self.parse_board(img)
             print("  Board parsed by template matching (no CNN)")
 
-        # Fix obvious CNN misclassifications (wrong color pawn behind river)
-        if self.cnn:
-            for r in range(10):
-                for c in range(9):
-                    p = board[r][c]
-                    if p not in ('P', 'p'):
-                        continue
-                    if self.playing_red:
-                        # Rows 0-3 = opponent territory, rows 6-9 = our territory
-                        if p == 'P' and r <= 3:
-                            board[r][c] = 'p'; print(f"  CNN fix: ({r},{c}) P→p")
-                        elif p == 'p' and r >= 6:
-                            board[r][c] = 'P'; print(f"  CNN fix: ({r},{c}) p→P")
-                    else:
-                        # Rows 0-3 = opponent (red) territory, rows 6-9 = our territory
-                        if p == 'p' and r <= 3:
-                            board[r][c] = 'P'; print(f"  CNN fix: ({r},{c}) p→P")
-                        elif p == 'P' and r >= 6:
-                            board[r][c] = 'p'; print(f"  CNN fix: ({r},{c}) P→p")
-
         fen = self.board_to_fen(board)
-        expected = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR"
         print(f"\n  FEN: {fen}")
-        if fen == expected:
-            print("  ✓ Initial position!")
-        else:
-            print("  ⚠ Not initial position (game already started)")
 
         # Print board
         for r in range(10):
@@ -1731,69 +1706,20 @@ class Bot:
                 line += f" {p}" if p else " ."
             print(line)
 
-        # Game loop
+        # Game loop — supports starting from any position
         turn = "w" if self.playing_red else "b"
-        my_turn = self.playing_red or (fen != expected)
+        my_turn = True  # Default: it's our turn. Start playing immediately.
         prev_img = img
         prev_snap = self.crop_board_region(img)
         n = 0
         start_fen = f"{fen} {turn} - - 0 1"
-        move_history = []  # UCI moves for repetition detection
-        fen_history = []   # FEN strings to detect repetition
-        self._cnn_session = int(time.time())  # For CNN data collection
+        move_history = []
+        fen_history = []
+        self._cnn_session = int(time.time())
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
-        # If playing BLACK at initial position, wait for opponent's first move
-        if not self.playing_red and fen == expected:
-            print("  Playing BLACK — waiting for opponent's first move...")
-            ref = self.crop_board_region(img)
-            for wi in range(60):  # Up to 30s
-                time.sleep(0.5)
-                curr = self.screenshot_for_processing()
-                curr_crop = self.crop_board_region(curr)
-                if self.images_changed(ref, curr_crop):
-                    # Board changed, wait for animation
-                    time.sleep(1.5)
-                    ps = self.crop_board_region(self.screenshot_for_processing())
-                    s = 0
-                    for j in range(20):
-                        time.sleep(0.5)
-                        cs = self.crop_board_region(self.screenshot_for_processing())
-                        if not self.images_changed(ps, cs):
-                            s += 1
-                        else:
-                            s = 0
-                        ps = cs
-                        if s >= 3:
-                            break
-                    img_opp = self.screenshot_for_processing()
-                    print("  Opponent moved!")
-                    # Detect their move
-                    result = self.detect_move_highlight(img_opp, board, fen)
-                    if result is None:
-                        result = self.detect_move_perft(img, img_opp, board, fen)
-                    if result is None:
-                        result = self.detect_move_occupancy(img_opp, board, fen)
-                    if result is not None:
-                        opp_move = self._find_move(fen, self.board_to_fen(result))
-                        if opp_move:
-                            move_history.append(opp_move)
-                        board = result
-                        fen = self.board_to_fen(board)
-                        print(f"  Opponent → {fen}")
-                    else:
-                        print("  ⚠ Could not detect first move, re-parsing...")
-                        board = self.parse_board(img_opp)
-                        fen = self.board_to_fen(board)
-                        print(f"  Re-parsed → {fen}")
-                    break
-                if wi % 20 == 0 and wi > 0:
-                    sys.stdout.write(".")
-                    sys.stdout.flush()
-            my_turn = True
-
-        click_fail_count = 0  # Track consecutive click failures for FEN recovery
+        click_fail_count = 0
 
         while True:
             try:
