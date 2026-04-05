@@ -111,7 +111,7 @@ def collect_from_screenshot(img, cols_logical, rows_logical, board, retina_scale
     for d in PIECE_TO_DIR.values():
         os.makedirs(os.path.join(DATA_DIR, d), exist_ok=True)
 
-    radius = int(min(cell_w, cell_h) * retina_scale * 0.45)
+    radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
     count = 0
 
     for r in range(10):
@@ -297,7 +297,7 @@ class PieceClassifierCNN:
     def parse_board(self, img, cols_logical, rows_logical, retina_scale, win_x, win_y,
                     cell_w, cell_h):
         """Parse entire board from a single screenshot. Returns 10x9 board array."""
-        radius = int(min(cell_w, cell_h) * retina_scale * 0.45)
+        radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
         board = [[None] * 9 for _ in range(10)]
 
         for r in range(10):
