@@ -1736,36 +1736,18 @@ class Bot:
 
                     if not best or best == '(none)':
                         print(f"No move! FEN: {full_fen}")
-                        # CNN might have red/black swapped — try flipping
-                        swapped = fen.swapcase()
-                        print(f"  Trying color swap: {swapped}")
-                        swap_fen = f"{swapped} {turn} - - 0 1"
-                        best2, info2 = self.pikafish(swap_fen)
-                        if best2 and best2 != '(none)':
-                            print(f"  Color swap worked! Using swapped FEN")
-                            fen = swapped
-                            # Also fix the board array
-                            for r in range(10):
-                                for c in range(9):
-                                    p = board[r][c]
-                                    if p:
-                                        board[r][c] = p.swapcase()
-                            best, info = best2, info2
-                            start_fen = f"{fen} {turn} - - 0 1"
-                            move_history = []
+                        print("  Re-parsing board...")
+                        time.sleep(2)
+                        img = self.screenshot_for_processing()
+                        if self.cnn:
+                            board = self.parse_board_cnn(img)
                         else:
-                            print("  Re-parsing board...")
-                            time.sleep(1)
-                            img = self.screenshot_for_processing()
-                            if self.cnn:
-                                board = self.parse_board_cnn(img)
-                            else:
-                                board = self.parse_board(img)
-                            fen = self.board_to_fen(board)
-                            move_history = []
-                            start_fen = f"{fen} {turn} - - 0 1"
-                            print(f"  Re-parsed FEN: {fen}")
-                            continue
+                            board = self.parse_board(img)
+                        fen = self.board_to_fen(board)
+                        move_history = []
+                        start_fen = f"{fen} {turn} - - 0 1"
+                        print(f"  Re-parsed FEN: {fen}")
+                        continue
 
                     n += 1
                     sc = self.score_str(info)
