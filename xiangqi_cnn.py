@@ -296,6 +296,23 @@ class PieceClassifierCNN:
                     continue
 
                 piece, conf = self.classify_cell(patch)
+
+                # Sanity check: verify piece color matches HSV analysis
+                if piece and conf < 0.95:
+                    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+                    total = patch.shape[0] * patch.shape[1]
+                    m1 = cv2.inRange(hsv, (0, 60, 60), (12, 255, 255))
+                    m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
+                    red_ratio = (cv2.countNonZero(m1) + cv2.countNonZero(m2)) / total
+                    is_red_visual = red_ratio > 0.03
+
+                    if piece.isupper() and not is_red_visual:
+                        # CNN says red but HSV says not red → might be black or empty
+                        piece = piece.lower()  # Swap to black
+                    elif piece.islower() and is_red_visual:
+                        # CNN says black but HSV says red → swap to red
+                        piece = piece.upper()
+
                 board[r][c] = piece
 
         return board

@@ -1793,8 +1793,13 @@ class Bot:
                         print("Retrying parse...")
                         time.sleep(1)
                         img = self.screenshot_for_processing()
-                        board = self.parse_board(img)
+                        if self.cnn:
+                            board = self.parse_board_cnn(img)
+                        else:
+                            board = self.parse_board(img)
                         fen = self.board_to_fen(board)
+                        start_fen = f"{fen} {turn} - - 0 1"
+                        move_history = []
                         print(f"  Retry FEN: {fen}")
                         continue
 
