@@ -1816,46 +1816,24 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait for animations + opponent response
+                # Step 3: Wait until board fully settles
+                # (our animation + opponent response + their animation)
+                # Don't separate phases — just wait for stable board
                 print("  Waiting...", end="", flush=True)
+                time.sleep(1.0)  # Brief initial wait for our click to register
+                last_change = time.time()
                 prev_check = self.crop_board_region(self.screenshot_for_processing())
-                # Wait until board settles after our move
-                stable = 0
-                for wi in range(20):
-                    time.sleep(0.5)
+                while time.time() - last_change < 30:  # Max 30s since last change
+                    time.sleep(0.4)
                     curr_check = self.crop_board_region(self.screenshot_for_processing())
                     if self.images_changed(prev_check, curr_check):
-                        stable = 0
+                        last_change = time.time()  # Reset timer on any change
+                        sys.stdout.write("~")
                     else:
-                        stable += 1
+                        # Board stable — but wait at least 2s since last change
+                        if time.time() - last_change >= 2.0:
+                            break
                     prev_check = curr_check
-                    if stable >= 3:
-                        break
-
-                # Now wait for opponent's response (board changes again)
-                opp_ref = self.crop_board_region(self.screenshot_for_processing())
-                for wi in range(120):  # Up to 60s
-                    time.sleep(0.5)
-                    curr = self.screenshot_for_processing()
-                    if self.images_changed(opp_ref, self.crop_board_region(curr)):
-                        sys.stdout.write("!")
-                        # Wait for their animation to settle
-                        time.sleep(1.0)
-                        ps = self.crop_board_region(self.screenshot_for_processing())
-                        s = 0
-                        for j in range(15):
-                            time.sleep(0.5)
-                            cs = self.crop_board_region(self.screenshot_for_processing())
-                            if not self.images_changed(ps, cs):
-                                s += 1
-                            else:
-                                s = 0
-                            ps = cs
-                            if s >= 3:
-                                break
-                        break
-                    if wi % 20 == 0:
-                        sys.stdout.write(".")
                     sys.stdout.flush()
                 print(" done")
 
