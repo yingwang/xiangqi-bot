@@ -111,7 +111,7 @@ def collect_from_screenshot(img, cols_logical, rows_logical, board, retina_scale
     for d in PIECE_TO_DIR.values():
         os.makedirs(os.path.join(DATA_DIR, d), exist_ok=True)
 
-    radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
+    radius = int(min(cell_w, cell_h) * retina_scale * 0.45)
     count = 0
 
     for r in range(10):
@@ -169,6 +169,23 @@ def augment_data():
                 M = cv2.getRotationMatrix2D((img.shape[1]//2, img.shape[0]//2), angle, 1)
                 aug = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
                 cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_rot{i}.png"), aug)
+
+            # Scale variations (simulate selected/enlarged piece)
+            h, w = img.shape[:2]
+            for i, scale in enumerate([1.15, 1.25, 0.85]):
+                sh, sw = int(h * scale), int(w * scale)
+                scaled = cv2.resize(img, (sw, sh))
+                # Center crop/pad back to original size
+                if scale > 1:
+                    y0 = (sh - h) // 2
+                    x0 = (sw - w) // 2
+                    aug = scaled[y0:y0+h, x0:x0+w]
+                else:
+                    aug = np.zeros_like(img)
+                    y0 = (h - sh) // 2
+                    x0 = (w - sw) // 2
+                    aug[y0:y0+sh, x0:x0+sw] = scaled
+                cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_sc{i}.png"), aug)
 
 
 # --- Training ---
@@ -280,7 +297,7 @@ class PieceClassifierCNN:
     def parse_board(self, img, cols_logical, rows_logical, retina_scale, win_x, win_y,
                     cell_w, cell_h):
         """Parse entire board from a single screenshot. Returns 10x9 board array."""
-        radius = int(min(cell_w, cell_h) * retina_scale * 0.40)
+        radius = int(min(cell_w, cell_h) * retina_scale * 0.45)
         board = [[None] * 9 for _ in range(10)]
 
         for r in range(10):
@@ -296,23 +313,6 @@ class PieceClassifierCNN:
                     continue
 
                 piece, conf = self.classify_cell(patch)
-
-                # Sanity check: verify piece color matches HSV analysis
-                if piece and conf < 0.95:
-                    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-                    total = patch.shape[0] * patch.shape[1]
-                    m1 = cv2.inRange(hsv, (0, 60, 60), (12, 255, 255))
-                    m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
-                    red_ratio = (cv2.countNonZero(m1) + cv2.countNonZero(m2)) / total
-                    is_red_visual = red_ratio > 0.03
-
-                    if piece.isupper() and not is_red_visual:
-                        # CNN says red but HSV says not red → might be black or empty
-                        piece = piece.lower()  # Swap to black
-                    elif piece.islower() and is_red_visual:
-                        # CNN says black but HSV says red → swap to red
-                        piece = piece.upper()
-
                 board[r][c] = piece
 
         return board

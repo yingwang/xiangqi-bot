@@ -1860,7 +1860,12 @@ class Bot:
                     sys.stdout.flush()
                 print(" done")
 
-                # Step 4: Re-parse entire board with CNN (no tracking needed!)
+                # Step 4: Click empty area to deselect any piece, then re-parse
+                # River area (row 4-5) is usually empty — click there
+                river_x = self.cols_logical[4]  # Center column
+                river_y = (self.rows_logical[4] + self.rows_logical[5]) / 2
+                self.click(river_x, river_y)
+                time.sleep(0.5)
                 img = self.screenshot_for_processing()
                 board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
                 fen = self.board_to_fen(board)
