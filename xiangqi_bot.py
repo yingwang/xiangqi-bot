@@ -1683,14 +1683,23 @@ class Bot:
         img = self.screenshot_for_processing()
         print(f"  Image: {img.shape[1]}x{img.shape[0]}, retina={self.retina_scale:.2f}x")
 
-        print("[4] Detecting orientation...")
-        self.detect_orientation(img)
-
-        print("[5] Loading CNN / templates...")
+        print("[4] Loading CNN / detecting orientation...")
         if self.load_cnn():
             board = self.parse_board_cnn(img)
-            print("  Board parsed by CNN")
+            # Detect orientation from king positions (works for any board state)
+            k_row = None
+            for r in range(10):
+                for c in range(9):
+                    if board[r][c] == 'K':
+                        k_row = r
+            if k_row is not None and k_row <= 4:
+                self.playing_red = False
+                print(f"  You play: BLACK (red K at row {k_row})")
+            else:
+                self.playing_red = True
+                print(f"  You play: RED (red K at row {k_row})")
         else:
+            self.detect_orientation(img)
             self.capture_templates(img)
             board = self.parse_board(img)
             print("  Board parsed by template matching (no CNN)")
