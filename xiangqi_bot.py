@@ -1782,6 +1782,14 @@ class Bot:
         print(f"  Image: {img.shape[1]}x{img.shape[0]}, retina={self.retina_scale:.2f}x")
 
         print("[4] Loading CNN / detecting orientation...")
+        # Clean up old debug data at game start
+        import shutil
+        dbg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
+        if os.path.exists(dbg_root):
+            shutil.rmtree(dbg_root)
+        self._debug_step = 0
+        print(f"  Debug patches dir: {dbg_root}")
+
         if self.load_cnn():
             board = self.parse_board_cnn(img)
             # Detect orientation from king positions (works for any board state)
@@ -1822,13 +1830,6 @@ class Bot:
 
         fen_history = {}  # fen -> last_move, to avoid repetition
         excluded_moves = []  # moves to exclude if position repeats
-        # Clean up old debug data
-        import shutil
-        dbg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
-        if os.path.exists(dbg_root):
-            shutil.rmtree(dbg_root)
-        self._debug_step = 0
-        print(f"  Debug patches dir: {dbg_root}")
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
