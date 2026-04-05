@@ -1039,6 +1039,53 @@ class Bot:
         except: proc.kill()
         return moves
 
+    def _find_move(self, old_fen, new_fen):
+        """Find the UCI move that transforms old_fen → new_fen."""
+        opp_turn = 'b' if self.playing_red else 'w'
+        legal = self.get_legal_moves(f"{old_fen} {opp_turn} - - 0 1")
+        for move in legal:
+            # Simulate this move on a temp board
+            src, dst = self.uci_to_screen_cells(move)
+            # Quick check: just try to match FEN
+            # (We already know the result board, so just find which legal move matches)
+            fc, fr = ord(move[0]) - ord('a'), int(move[1])
+            tc, tr = ord(move[2]) - ord('a'), int(move[3])
+            if self.playing_red:
+                sr1, sc1 = 9 - fr, fc
+                sr2, sc2 = 9 - tr, tc
+            else:
+                sr1, sc1 = fr, 8 - fc
+                sr2, sc2 = tr, 8 - tc
+            # Parse old_fen to board, apply move, check if result matches new_fen
+            # For speed, just return the first move that could explain the change
+            temp = self._fen_to_board(old_fen)
+            if temp and temp[sr1][sc1] is not None:
+                temp[sr2][sc2] = temp[sr1][sc1]
+                temp[sr1][sc1] = None
+                if self.board_to_fen(temp) == new_fen:
+                    return move
+        return None
+
+    def _fen_to_board(self, fen):
+        """Convert FEN string to 10x9 board array."""
+        rows = fen.split('/')
+        if len(rows) != 10:
+            return None
+        board = []
+        for row_str in rows:
+            row = []
+            for ch in row_str:
+                if ch.isdigit():
+                    row.extend([None] * int(ch))
+                else:
+                    row.append(ch)
+            if len(row) != 9:
+                return None
+            board.append(row)
+        if not self.playing_red:
+            board = [row[::-1] for row in reversed(board)]
+        return board
+
     def uci_to_screen_cells(self, move):
         """Convert UCI move to screen (row, col) pairs."""
         fc, fr = ord(move[0]) - ord('a'), int(move[1])
@@ -1049,12 +1096,14 @@ class Bot:
             return (fr, 8-fc), (tr, 8-tc)
 
     def _cell_change(self, img_before, img_after, r, c):
-        """Compute pixel change at a specific cell."""
+        """Compute pixel change at a specific cell (centered, no overlap)."""
         px, py = self.logical_to_pixel(self.cols_logical[c], self.rows_logical[r])
-        ps = self.patch_size
+        # 35% of cell size as half-width — fits inside cell, no neighbor overlap
+        # (old 0.7 caused 218px patch vs 156px cell spacing = massive overlap!)
+        hs = int(min(self.cell_w, self.cell_h) * self.retina_scale * 0.35)
         h, w = img_before.shape[:2]
-        x1, y1 = max(0, px-ps), max(0, py-ps)
-        x2, y2 = min(w, px+ps), min(h, py+ps)
+        x1, y1 = max(0, px-hs), max(0, py-hs)
+        x2, y2 = min(w, px+hs), min(h, py+hs)
         p1 = img_before[y1:y2, x1:x2]
         p2 = img_after[y1:y2, x1:x2]
         if p1.shape != p2.shape or p1.size == 0:
@@ -1088,19 +1137,197 @@ class Bot:
         top3 = [(m, f"{s:.1f}") for m, _, _, s in scored[:3]]
         print(f"    Top: {top3}")
 
-        if best_score >= 0.5:
-            piece = board_before[best_src[0]][best_src[1]]
-            if piece:
-                board_after[best_src[0]][best_src[1]] = None
-                board_after[best_dst[0]][best_dst[1]] = piece
-                print(f"    Move: {best_move} ({piece} {best_src}→{best_dst}) [Δ={best_score:.1f}]")
-            else:
-                print(f"    Move: {best_move} but no piece at {best_src}")
+        # Correct detections score 50-100+. Below 20 is always wrong.
+        if best_score < 20:
+            print(f"    ⚠ Score too low (Δ={best_score:.1f}), need > 20")
+            return None
+        if best_score < 40 and len(scored) > 1 and best_score < scored[1][3] * 2:
+            print(f"    ⚠ Low confidence (Δ={best_score:.1f}), gap too small")
+            return None
+
+        piece = board_before[best_src[0]][best_src[1]]
+        if piece:
+            board_after[best_src[0]][best_src[1]] = None
+            board_after[best_dst[0]][best_dst[1]] = piece
+            print(f"    Move: {best_move} ({piece} {best_src}→{best_dst}) [Δ={best_score:.1f}]")
         else:
-            print(f"    ⚠ Low confidence (Δ={best_score:.1f}), retrying...")
+            print(f"    Move: {best_move} but no piece at {best_src}")
             return None
 
         return board_after
+
+    # --- Highlight-based detection (most reliable) ---
+
+    def _cell_highlight_score(self, img, r, c):
+        """Detect green/yellow highlight at a cell. Returns highlight pixel ratio."""
+        px, py = self.logical_to_pixel(self.cols_logical[c], self.rows_logical[r])
+        hs = int(min(self.cell_w, self.cell_h) * self.retina_scale * 0.45)
+        h, w = img.shape[:2]
+        x1, y1 = max(0, px - hs), max(0, py - hs)
+        x2, y2 = min(w, px + hs), min(h, py + hs)
+        patch = img[y1:y2, x1:x2]
+        if patch.size == 0:
+            return 0.0
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        total = patch.shape[0] * patch.shape[1]
+        # Green highlight: H 35-85
+        green = cv2.inRange(hsv, (35, 40, 80), (85, 255, 255))
+        # Yellow-green: H 20-35
+        yellow = cv2.inRange(hsv, (20, 40, 80), (35, 255, 255))
+        return (cv2.countNonZero(green) + cv2.countNonZero(yellow)) / total
+
+    def detect_move_highlight(self, img, board_after_our_move, fen_after_our_move,
+                              our_move=None):
+        """Detect opponent's move by finding highlighted cells (green/yellow markers).
+
+        天天象棋 highlights the source and destination of the last move.
+        We find those cells and match against legal opponent moves.
+        """
+        opp_turn = 'b' if self.playing_red else 'w'
+        opp_fen = f"{fen_after_our_move} {opp_turn} - - 0 1"
+        legal_moves = self.get_legal_moves(opp_fen)
+        if not legal_moves:
+            return None
+
+        # Compute highlight score for every cell
+        hl = {}
+        for r in range(10):
+            for c in range(9):
+                hl[(r, c)] = self._cell_highlight_score(img, r, c)
+
+        # Filter out our own move's highlight cells
+        our_cells = set()
+        if our_move:
+            s, d = self.uci_to_screen_cells(our_move)
+            our_cells = {(s[0], s[1]), (d[0], d[1])}
+
+        # Score each legal move by highlight at src+dst
+        scored = []
+        for move in legal_moves:
+            src, dst = self.uci_to_screen_cells(move)
+            sk, dk = (src[0], src[1]), (dst[0], dst[1])
+            # Skip if this move's cells overlap with our move's highlight
+            if sk in our_cells or dk in our_cells:
+                scored.append((move, src, dst, 0.0))
+                continue
+            scored.append((move, src, dst, hl[sk] + hl[dk]))
+
+        scored.sort(key=lambda x: -x[3])
+        best = scored[0]
+
+        # Debug: show top highlights and top moves
+        top_cells = sorted(hl.items(), key=lambda x: -x[1])[:5]
+        top_moves = [(m, f"{s:.3f}") for m, _, _, s in scored[:3]]
+        print(f"    Hl cells: {[(f'{r},{c}', f'{s:.3f}') for (r,c),s in top_cells]}")
+        print(f"    Hl moves: {top_moves}")
+
+        if best[3] > 0.02:  # At least 2% highlight pixels across both cells
+            move, src, dst, score = best
+            piece = board_after_our_move[src[0]][src[1]]
+            if piece:
+                board_result = [row[:] for row in board_after_our_move]
+                board_result[src[0]][src[1]] = None
+                board_result[dst[0]][dst[1]] = piece
+                print(f"    HlMove: {move} ({piece}) [score={score:.3f}]")
+                return board_result
+
+        return None
+
+    # --- Single-image occupancy detection (no before/after needed) ---
+
+    def _cell_feature(self, img, r, c):
+        """Brightness std at cell center — high for pieces, low for empty cells."""
+        px, py = self.logical_to_pixel(self.cols_logical[c], self.rows_logical[r])
+        radius = int(min(self.cell_w, self.cell_h) * self.retina_scale * 0.25)
+        h, w = img.shape[:2]
+        x1, y1 = max(0, px - radius), max(0, py - radius)
+        x2, y2 = min(w, px + radius), min(h, py + radius)
+        patch = img[y1:y2, x1:x2]
+        if patch.size == 0:
+            return 0.0
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        return float(np.std(gray))
+
+    def detect_move_occupancy(self, img, board_after_our_move, fen_after_our_move):
+        """Detect opponent's move from a SINGLE image using occupancy analysis.
+
+        Uses brightness std to distinguish pieces (high variance: bright center +
+        dark text) from empty cells (low variance: uniform board color).
+        Calibrates threshold on-the-fly from known cells.
+        """
+        opp_turn = 'b' if self.playing_red else 'w'
+        opp_fen = f"{fen_after_our_move} {opp_turn} - - 0 1"
+        legal_moves = self.get_legal_moves(opp_fen)
+
+        if not legal_moves:
+            return None
+
+        # Compute brightness std for every cell
+        features = {}
+        for r in range(10):
+            for c in range(9):
+                features[(r, c)] = self._cell_feature(img, r, c)
+
+        # Collect cells that are src/dst of any legal move
+        src_cells = set()
+        dst_cells = set()
+        for move in legal_moves:
+            src, dst = self.uci_to_screen_cells(move)
+            src_cells.add((src[0], src[1]))
+            dst_cells.add((dst[0], dst[1]))
+
+        # Safe references: cells not involved in any legal move
+        occ_ref = [features[rc] for rc in
+                   [(r, c) for r in range(10) for c in range(9)
+                    if board_after_our_move[r][c] is not None and (r, c) not in src_cells]]
+        emp_ref = [features[rc] for rc in
+                   [(r, c) for r in range(10) for c in range(9)
+                    if board_after_our_move[r][c] is None and (r, c) not in dst_cells]]
+
+        if len(occ_ref) < 3 or len(emp_ref) < 3:
+            print("    Occ: insufficient ref cells")
+            return None
+
+        occ_med = float(np.median(occ_ref))
+        emp_med = float(np.median(emp_ref))
+        threshold = (occ_med + emp_med) / 2
+
+        if occ_med - emp_med < 5:
+            print(f"    Occ: weak separation ({occ_med:.1f} vs {emp_med:.1f})")
+            return None
+
+        print(f"    Occ: occ={occ_med:.1f} emp={emp_med:.1f} thr={threshold:.1f}")
+
+        # Score each legal move
+        scored = []
+        for move in legal_moves:
+            src, dst = self.uci_to_screen_cells(move)
+            sf = features[(src[0], src[1])]
+            df = features[(dst[0], dst[1])]
+            # After move: src empty (low std), dst has piece (high std)
+            src_empty = max(0, threshold - sf)
+            dst_piece = max(0, df - threshold)
+            score = src_empty * 2 + dst_piece  # src leaving is clearest signal
+            scored.append((move, src, dst, score, sf, df))
+
+        scored.sort(key=lambda x: -x[3])
+        top3 = [(m, f"{s:.1f}") for m, _, _, s, _, _ in scored[:3]]
+        print(f"    Occ top: {top3}")
+
+        best = scored[0]
+        margin_ok = len(scored) < 2 or best[3] > scored[1][3] * 1.3
+        if best[3] > 3 and margin_ok:
+            move, src, dst, _, sf, df = best
+            piece = board_after_our_move[src[0]][src[1]]
+            if piece:
+                board_result = [row[:] for row in board_after_our_move]
+                board_result[src[0]][src[1]] = None
+                board_result[dst[0]][dst[1]] = piece
+                print(f"    OccMove: {move} ({piece}) sf={sf:.1f} df={df:.1f}")
+                return board_result
+
+        print(f"    Occ: no confident move (best={best[3]:.1f})")
+        return None
 
     def detect_move(self, img_before, img_after, board_before):
         """Detect opponent's move by finding which cells changed."""
@@ -1273,12 +1500,17 @@ class Bot:
 
     # --- Pikafish ---
 
-    def pikafish(self, fen):
+    def pikafish(self, fen, move_history=None):
         proc = subprocess.Popen(
             [PIKAFISH], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, cwd=PIKAFISH_DIR)
+        # Send move history so engine can detect repetitions
+        if move_history:
+            pos_cmd = f"position fen {fen} moves {' '.join(move_history)}\n"
+        else:
+            pos_cmd = f"position fen {fen}\n"
         try:
-            proc.stdin.write(f"uci\nisready\nposition fen {fen}\ngo movetime {MOVE_TIME_MS}\n")
+            proc.stdin.write(f"uci\nisready\n{pos_cmd}go movetime {MOVE_TIME_MS}\n")
             proc.stdin.flush()
         except BrokenPipeError:
             err = proc.stderr.read()
@@ -1385,6 +1617,9 @@ class Bot:
         prev_img = img
         prev_snap = self.crop_board_region(img)
         n = 0
+        start_fen = f"{fen} {turn} - - 0 1"
+        move_history = []  # UCI moves for repetition detection
+        fen_history = []   # FEN strings to detect repetition
 
         print(f"\n--- Game loop (Ctrl+C to stop) ---\n")
 
@@ -1392,9 +1627,13 @@ class Bot:
             try:
                 if my_turn:
                     full_fen = f"{fen} {turn} - - 0 1"
+                    fen_history.append(fen)
+                    rep_count = fen_history.count(fen)
+                    if rep_count >= 3:
+                        print(f"  ⚠ Position repeated {rep_count}x!")
                     print(f"  FEN → Pikafish: {full_fen}")
                     t0 = time.time()
-                    best, info = self.pikafish(full_fen)
+                    best, info = self.pikafish(start_fen, move_history)
                     dt = time.time() - t0
 
                     if not best or best == '(none)':
@@ -1416,23 +1655,38 @@ class Bot:
 
                     # Capture BEFORE clicking (baseline for detection)
                     img_before_move = self.screenshot_for_processing()
+                    before_crop = self.crop_board_region(img_before_move)
 
-                    self.activate_window()
-                    time.sleep(0.3)
-                    self.click(pts[0][0], pts[0][1])
-                    time.sleep(0.8)
-                    self.click(pts[1][0], pts[1][1])
+                    # Click with retry — sometimes CGEvent clicks don't register
+                    click_ok = False
+                    for click_try in range(5):
+                        self.activate_window()
+                        time.sleep(0.5)
+                        self.click(pts[0][0], pts[0][1])
+                        time.sleep(1.0)
+                        self.click(pts[1][0], pts[1][1])
+                        time.sleep(1.2)
+                        # Verify click registered
+                        check = self.crop_board_region(
+                            self.screenshot_for_processing())
+                        if self.images_changed(before_crop, check):
+                            click_ok = True
+                            break
+                        if click_try < 4:
+                            print(f"  Click retry {click_try+1}...")
+                            time.sleep(1.0)
 
-                    # Wait for our move + opponent response + animations
-                    # Simple approach: wait, poll for stability
-                    time.sleep(1.0)
-                    print("  Waiting...", end="", flush=True)
+                    if not click_ok:
+                        print("  ⚠ Click failed after 5 retries! Retrying move...")
+                        time.sleep(2.0)
+                        continue  # Re-query pikafish, retry same position
 
-                    # Take snapshots and wait until board is stable for 2 consecutive checks
+                    # === Phase 1: Wait for animations to settle ===
+                    print("  Settling...", end="", flush=True)
                     prev_check = self.crop_board_region(self.screenshot_for_processing())
                     stable = 0
-                    for wait_i in range(30):
-                        time.sleep(0.6)
+                    for wait_i in range(25):
+                        time.sleep(0.5)
                         curr_check = self.crop_board_region(self.screenshot_for_processing())
                         if self.images_changed(prev_check, curr_check):
                             stable = 0
@@ -1442,19 +1696,12 @@ class Bot:
                             sys.stdout.write(".")
                         sys.stdout.flush()
                         prev_check = curr_check
-                        # Need at least 4 stable + at least 3 seconds elapsed
-                        if stable >= 4 and wait_i >= 4:
+                        if stable >= 3 and wait_i >= 3:
                             break
+                    img_settled = self.screenshot_for_processing()
+                    print()
 
-                    img_after_our_move = self.screenshot_for_processing()
-
-                    # If opponent is fast, img_after_our_move already has their response.
-                    # Take one more screenshot after a short extra wait to be sure.
-                    time.sleep(1.5)
-                    img_after = self.screenshot_for_processing()
-                    print(" done!")
-
-                    # Update board by applying our known move
+                    # Update board by applying our known move (100% accurate)
                     fc, fr = ord(best[0]) - ord('a'), int(best[1])
                     tc, tr = ord(best[2]) - ord('a'), int(best[3])
                     if self.playing_red:
@@ -1466,9 +1713,10 @@ class Bot:
                     board[sr2][sc2] = board[sr1][sc1]
                     board[sr1][sc1] = None
                     fen = self.board_to_fen(board)
+                    move_history.append(best)
                     print(f"  After our move: {fen}")
 
-                    # Check if game is over (checkmate — no legal moves for opponent)
+                    # Check if game is over
                     opp_turn = 'b' if self.playing_red else 'w'
                     opp_fen = f"{fen} {opp_turn} - - 0 1"
                     legal = self.get_legal_moves(opp_fen)
@@ -1476,32 +1724,92 @@ class Bot:
                         print(f"\n  ★ CHECKMATE! We win in {n} moves! ★")
                         break
 
-                    # Debug: verify images differ
-                    d1 = cv2.absdiff(img_before_move, img_after).mean()
-                    d2 = cv2.absdiff(img_after_our_move, img_after).mean()
-                    print(f"  Diffs: before→after={d1:.1f}, mid→after={d2:.1f}")
-
-                    # Try detection with best available image pair
+                    # === Phase 2: Detect opponent's move ===
                     result = None
-                    if d1 > 0.1:
-                        result = self.detect_move_perft(img_before_move, img_after, board, fen)
-                    if result is None and d2 > 0.1:
-                        print("  Trying mid→after...")
-                        result = self.detect_move_perft(img_after_our_move, img_after, board, fen)
-                    if result is None and d1 > 0.1:
-                        # One more try with fresh screenshot
-                        print("  Retrying with fresh screenshot...")
-                        time.sleep(2.0)
-                        img_fresh = self.screenshot_for_processing()
-                        result = self.detect_move_perft(img_before_move, img_fresh, board, fen)
+                    detected_move = None
+
+                    # Try 1: highlight detection (most reliable)
+                    result = self.detect_move_highlight(
+                        img_settled, board, fen, our_move=best)
+
+                    # Try 2: pixel diff (before → settled)
                     if result is None:
-                        print(f"  ⚠ Could not detect (diffs: {d1:.1f}, {d2:.1f}). Stopping.")
+                        d1 = cv2.absdiff(img_before_move, img_settled).mean()
+                        print(f"  Diff before→settled: {d1:.1f}")
+                        if d1 > 0.1:
+                            result = self.detect_move_perft(
+                                img_before_move, img_settled, board, fen)
+
+                    # Try 3: single-image occupancy
+                    if result is None:
+                        result = self.detect_move_occupancy(
+                            img_settled, board, fen)
+
+                    # Try 4: opponent hasn't moved yet — wait for response
+                    if result is None:
+                        print("  Waiting for opponent...", end="", flush=True)
+                        opp_ref = self.crop_board_region(img_settled)
+                        opp_detected = False
+                        for wait_i in range(120):  # Up to 60s
+                            time.sleep(0.5)
+                            curr = self.screenshot_for_processing()
+                            curr_crop = self.crop_board_region(curr)
+                            if self.images_changed(opp_ref, curr_crop):
+                                sys.stdout.write("!")
+                                sys.stdout.flush()
+                                # Opponent moved! Wait for animation
+                                time.sleep(1.0)
+                                ps = self.crop_board_region(
+                                    self.screenshot_for_processing())
+                                s = 0
+                                for j in range(20):
+                                    time.sleep(0.5)
+                                    cs = self.crop_board_region(
+                                        self.screenshot_for_processing())
+                                    if not self.images_changed(ps, cs):
+                                        s += 1
+                                    else:
+                                        s = 0
+                                    ps = cs
+                                    if s >= 3:
+                                        break
+                                img_opp = self.screenshot_for_processing()
+                                print(" got it!")
+                                # Highlight first
+                                result = self.detect_move_highlight(
+                                    img_opp, board, fen, our_move=best)
+                                # Pixel diff
+                                if result is None:
+                                    result = self.detect_move_perft(
+                                        img_before_move, img_opp, board, fen)
+                                if result is None:
+                                    result = self.detect_move_perft(
+                                        img_settled, img_opp, board, fen)
+                                # Occupancy
+                                if result is None:
+                                    result = self.detect_move_occupancy(
+                                        img_opp, board, fen)
+                                opp_detected = True
+                                break
+                            if wait_i % 10 == 0:
+                                sys.stdout.write(".")
+                                sys.stdout.flush()
+                        if not opp_detected:
+                            print(" timeout!")
+
+                    if result is None:
+                        print(f"  ⚠ Could not detect opponent move. Stopping.")
                         break
+
+                    # Track opponent's move in history
+                    old_fen = fen
                     board = result
                     fen = self.board_to_fen(board)
+                    # Reconstruct opponent's UCI move for history
+                    opp_move = self._find_move(old_fen, fen)
+                    if opp_move:
+                        move_history.append(opp_move)
                     print(f"  Opponent → {fen}")
-                    prev_img = img_after
-                    prev_snap = self.crop_board_region(img_after)
 
             except KeyboardInterrupt:
                 print("\nStopped."); break
