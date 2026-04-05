@@ -1628,17 +1628,23 @@ class Bot:
 
     # --- Pikafish ---
 
-    def pikafish(self, fen, move_history=None):
+    def pikafish(self, fen, move_history=None, excluded=None):
         proc = subprocess.Popen(
             [PIKAFISH], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, cwd=PIKAFISH_DIR)
-        # Send move history so engine can detect repetitions
         if move_history:
             pos_cmd = f"position fen {fen} moves {' '.join(move_history)}\n"
         else:
             pos_cmd = f"position fen {fen}\n"
+        # Get all legal moves, exclude repetition moves
+        go_cmd = f"go movetime {MOVE_TIME_MS}"
+        if excluded:
+            legal = self.get_legal_moves(fen)
+            allowed = [m for m in legal if m not in excluded]
+            if allowed:
+                go_cmd = f"go movetime {MOVE_TIME_MS} searchmoves {' '.join(allowed)}"
         try:
-            proc.stdin.write(f"uci\nisready\n{pos_cmd}go movetime {MOVE_TIME_MS}\n")
+            proc.stdin.write(f"uci\nisready\n{pos_cmd}{go_cmd}\n")
             proc.stdin.flush()
         except BrokenPipeError:
             err = proc.stderr.read()
@@ -1754,17 +1760,33 @@ class Bot:
         last_fen = fen
         self._cnn_session = int(time.time())
 
+        fen_history = {}  # fen -> last_move, to avoid repetition
+        excluded_moves = []  # moves to exclude if position repeats
+
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
         while True:
             try:
                 # Step 1: Ask pikafish for best move
                 full_fen = f"{fen} {turn} - - 0 1"
+
+                # Check for repetition
+                if fen in fen_history:
+                    excluded_moves.append(fen_history[fen])
+                    excl_str = ' '.join(set(excluded_moves))
+                    print(f"  Repeat! Excluding: {excl_str}")
+
                 print(f"  FEN → Pikafish: {full_fen}")
-                best, info = self.pikafish(full_fen)
+                best, info = self.pikafish(full_fen, excluded=excluded_moves)
 
                 if not best or best == '(none)':
-                    # Invalid FEN — re-parse board
+                    # Try without exclusions
+                    if excluded_moves:
+                        print("  No move with exclusions, trying without...")
+                        excluded_moves = []
+                        best, info = self.pikafish(full_fen)
+
+                if not best or best == '(none)':
                     print(f"  No move! Re-parsing...")
                     time.sleep(2)
                     img = self.screenshot_for_processing()
@@ -1772,6 +1794,7 @@ class Bot:
                     fen = self.board_to_fen(board)
                     continue
 
+                fen_history[fen] = best  # Track this move for this position
                 n += 1
                 sc = self.score_str(info)
                 print(f"[{n}] {best} ({sc})")
