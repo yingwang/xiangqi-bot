@@ -1870,7 +1870,7 @@ class Bot:
     def is_my_turn(self):
         """Check if it's our turn by detecting walking-light animation on avatar.
         Takes two screenshots 0.5s apart. If avatar border pixels changed, it's animating.
-        Walking light (our turn): ~0.25% pixels change. Static (opponent): 0% change."""
+        Walking light (our turn): ~0.75% pixels change. Static (opponent): 0% change."""
         img1 = self.screenshot_for_processing()
         time.sleep(0.5)
         img2 = self.screenshot_for_processing()
@@ -1880,7 +1880,7 @@ class Bot:
             return False
         diff = cv2.absdiff(a1, a2)
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
-        changed = np.count_nonzero(gray > 15)
+        changed = np.count_nonzero(gray > 10)
         return (changed / gray.size) > 0.001  # >0.1% change = walking light active
 
     def run(self):
