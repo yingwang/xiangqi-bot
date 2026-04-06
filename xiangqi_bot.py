@@ -116,6 +116,95 @@ class Bot:
 
     # --- Calibration ---
 
+    def auto_calibrate(self, img):
+        """Auto-detect board grid using CNN. Start from default ratios, fine-tune with grid search."""
+        if not self.load_cnn():
+            print("  Auto-calibrate: CNN not available")
+            return False
+
+        import json
+        win_w = self._get_window_width()
+        win_h = self._get_window_height()
+
+        # Default ratios from known 天天象棋 layout
+        DEFAULT_RX1, DEFAULT_RY1 = 0.2985, 0.1344
+        DEFAULT_RX2, DEFAULT_RY2 = 0.7027, 0.9052
+
+        def try_grid(rx1, ry1, rx2, ry2):
+            """Try a grid configuration, return (total_confidence, non_empty_count)."""
+            x1 = self.win_x + rx1 * win_w
+            y1 = self.win_y + ry1 * win_h
+            x2 = self.win_x + rx2 * win_w
+            y2 = self.win_y + ry2 * win_h
+            cw = (x2 - x1) / 8.0
+            ch = (y2 - y1) / 9.0
+            cols = [x1 + i * cw for i in range(9)]
+            rows = [y1 + j * ch for j in range(10)]
+            # Suppress FEN validation output during grid search
+            import io
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                board = self.cnn.parse_board(
+                    img, cols, rows, self.retina_scale,
+                    self.win_x, self.win_y, cw, ch)
+            finally:
+                sys.stdout = old_stdout
+            # Score: sum of max confidence for non-empty cells
+            total_conf = 0.0
+            n_pieces = 0
+            for r in range(10):
+                for c in range(9):
+                    if self.cnn._cell_probs[r][c] is not None:
+                        conf = float(self.cnn._cell_probs[r][c].max())
+                        if board[r][c] is not None:
+                            total_conf += conf
+                            n_pieces += 1
+            return total_conf, n_pieces
+
+        # First try default ratios
+        best_score, best_n = try_grid(DEFAULT_RX1, DEFAULT_RY1, DEFAULT_RX2, DEFAULT_RY2)
+        best_params = (DEFAULT_RX1, DEFAULT_RY1, DEFAULT_RX2, DEFAULT_RY2)
+
+        # Fine-tune: grid search around default with small offsets
+        STEP = 0.005  # ~0.5% of window size
+        for dx in [-STEP, 0, STEP]:
+            for dy in [-STEP, 0, STEP]:
+                for ds in [-STEP, 0, STEP]:  # scale adjustment
+                    if dx == 0 and dy == 0 and ds == 0:
+                        continue
+                    rx1 = DEFAULT_RX1 + dx
+                    ry1 = DEFAULT_RY1 + dy
+                    rx2 = DEFAULT_RX2 + dx + ds
+                    ry2 = DEFAULT_RY2 + dy + ds
+                    score, n = try_grid(rx1, ry1, rx2, ry2)
+                    if score > best_score:
+                        best_score = score
+                        best_n = n
+                        best_params = (rx1, ry1, rx2, ry2)
+
+        rx1, ry1, rx2, ry2 = best_params
+        x1 = self.win_x + rx1 * win_w
+        y1 = self.win_y + ry1 * win_h
+        x2 = self.win_x + rx2 * win_w
+        y2 = self.win_y + ry2 * win_h
+
+        self.cell_w = (x2 - x1) / 8.0
+        self.cell_h = (y2 - y1) / 9.0
+        self.cols_logical = [x1 + i * self.cell_w for i in range(9)]
+        self.rows_logical = [y1 + j * self.cell_h for j in range(10)]
+
+        print(f"  Auto-calibrate (CNN): {best_n} pieces, conf={best_score:.1f}, cell={self.cell_w:.1f}x{self.cell_h:.1f}")
+
+        # Save calibration
+        with open(CALIB_PATH, 'w') as f:
+            json.dump({'rx1': rx1, 'ry1': ry1, 'rx2': rx2, 'ry2': ry2}, f)
+
+        if best_n < 10:
+            print("  Auto-calibrate: too few pieces detected, may be inaccurate")
+            return False
+        return True
+
     def calibrate(self):
         """Calibration: user points mouse to 2 corner pieces (countdown, no Enter needed)."""
         print("\n=== CALIBRATION ===")
@@ -1495,6 +1584,8 @@ class Bot:
 
     def load_cnn(self):
         """Load CNN piece classifier if available."""
+        if self.cnn:
+            return True
         try:
             from xiangqi_cnn import PieceClassifierCNN, MODEL_PATH
             if os.path.exists(MODEL_PATH):
@@ -1765,6 +1856,30 @@ class Bot:
         # If more than 0.5% of pixels changed significantly, board changed
         return change_ratio > 0.005
 
+    def crop_avatar_region(self, img):
+        """Crop our avatar region for turn detection.
+        The avatar border animates (walking light) when it's our turn.
+        Our avatar is always at bottom-right regardless of color."""
+        h, w = img.shape[:2]
+        x1 = int(w * 0.76)
+        y1 = int(h * 0.68)
+        x2 = int(w * 0.88)
+        y2 = int(h * 0.84)
+        return img[y1:y2, x1:x2].copy()
+
+    def avatar_changed(self, img1, img2):
+        """Check if avatar region changed. Lower threshold than board comparison
+        since the walking-light border animation is subtle."""
+        if img1 is None or img2 is None:
+            return True
+        if img1.shape != img2.shape:
+            return True
+        diff = cv2.absdiff(img1, img2)
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
+        changed_pixels = np.count_nonzero(gray_diff > 20)
+        total_pixels = gray_diff.size
+        return (changed_pixels / total_pixels) > 0.001  # 0.1% threshold
+
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
         if not os.path.exists(PIKAFISH):
@@ -1773,15 +1888,47 @@ class Bot:
         print("[1] Finding window...")
         self.find_window()
 
-        print("[2] Calibration...")
-        if not self.load_calibration():
-            self.calibrate()
-
-        print("[3] Taking screenshot...")
+        print("[2] Taking screenshot...")
         img = self.screenshot_for_processing()
         print(f"  Image: {img.shape[1]}x{img.shape[0]}, retina={self.retina_scale:.2f}x")
 
-        print("[4] Loading CNN / detecting orientation...")
+        print("[3] Calibration...")
+        if not self.load_calibration():
+            if not self.auto_calibrate(img):
+                print("  Auto-calibrate failed, falling back to manual...")
+                self.calibrate()
+                img = self.screenshot_for_processing()  # retake after manual calibration
+
+        print("[4] Waiting for board to stabilize...")
+        # Keep re-parsing until two consecutive reads give the same FEN
+        if self.load_cnn():
+            import io
+            # Suppress output during stabilization
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                board = self.parse_board_cnn(img)
+            finally:
+                sys.stdout = old_stdout
+            prev_fen = self.board_to_fen(board)
+            for stabilize_try in range(20):
+                time.sleep(1.0)
+                img = self.screenshot_for_processing()
+                old_stdout = sys.stdout
+                sys.stdout = io.StringIO()
+                try:
+                    board = self.parse_board_cnn(img)
+                finally:
+                    sys.stdout = old_stdout
+                curr_fen = self.board_to_fen(board)
+                if curr_fen == prev_fen:
+                    print(f"  Board stable after {stabilize_try + 1} check(s)")
+                    break
+                prev_fen = curr_fen
+            else:
+                print("  Warning: board did not stabilize, proceeding anyway")
+
+        print("[5] Detecting orientation...")
         # Clean up old debug data at game start
         import shutil
         dbg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
@@ -1790,7 +1937,7 @@ class Bot:
         self._debug_step = 0
         print(f"  Debug patches dir: {dbg_root}")
 
-        if self.load_cnn():
+        if self.cnn:
             board = self.parse_board_cnn(img)
             # Detect orientation from king positions (works for any board state)
             k_row = None
@@ -1826,12 +1973,63 @@ class Bot:
         turn = "w" if self.playing_red else "b"
         n = 0
         last_fen = fen
+        last_board = [row[:] for row in board]  # deep copy for diff
         self._cnn_session = int(time.time())
 
         fen_history = {}  # fen -> last_move, to avoid repetition
         excluded_moves = []  # moves to exclude if position repeats
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
+
+        # If playing black, wait for red's first move before starting
+        INITIAL_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR"
+        if not self.playing_red:
+            if fen != INITIAL_FEN:
+                # Opponent already moved during initialization
+                print("  Opponent already moved (detected during init)")
+            else:
+                # Board is still initial position — wait for opponent's first move
+                print("  Waiting for opponent's first move...", end="", flush=True)
+                ref = self.crop_board_region(img)  # use initial screenshot as reference
+                while True:
+                    time.sleep(0.5)
+                    curr = self.crop_board_region(self.screenshot_for_processing())
+                    if self.images_changed(ref, curr):
+                        # Board changed — wait for it to settle
+                        sys.stdout.write("~")
+                        sys.stdout.flush()
+                        time.sleep(2.0)
+                        # Check if still settling
+                        prev = self.crop_board_region(self.screenshot_for_processing())
+                        settled = False
+                        for _ in range(10):
+                            time.sleep(0.5)
+                            check = self.crop_board_region(self.screenshot_for_processing())
+                            if not self.images_changed(prev, check):
+                                settled = True
+                                break
+                            prev = check
+                            sys.stdout.write("~")
+                            sys.stdout.flush()
+                        if settled:
+                            break
+                        ref = self.crop_board_region(self.screenshot_for_processing())
+                print(" done")
+                # Click empty area to deselect, then re-parse
+                river_x = self.cols_logical[4]
+                river_y = (self.rows_logical[4] + self.rows_logical[5]) / 2
+                self.click(river_x, river_y)
+                time.sleep(0.5)
+                img = self.screenshot_for_processing()
+                board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
+                fen = self.board_to_fen(board)
+                print(f"  Opponent moved → {fen}")
+                for r in range(10):
+                    line = "  "
+                    for c in range(9):
+                        p = board[r][c]
+                        line += f" {p}" if p else " ."
+                    print(line)
 
         while True:
             try:
@@ -1906,36 +2104,43 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait until board fully settles
-                # (our animation + opponent response + their animation)
-                # Don't separate phases — just wait for stable board
+                # Step 3: Wait for our turn by monitoring avatar animation
                 print("  Waiting...", end="", flush=True)
-                time.sleep(1.0)  # Brief initial wait for our click to register
-                last_change = time.time()
-                prev_check = self.crop_board_region(self.screenshot_for_processing())
-                while time.time() - last_change < 30:  # Max 30s since last change
-                    time.sleep(0.4)
-                    curr_check = self.crop_board_region(self.screenshot_for_processing())
-                    if self.images_changed(prev_check, curr_check):
-                        last_change = time.time()  # Reset timer on any change
-                        sys.stdout.write("~")
-                    else:
-                        # Board stable — but wait at least 2s since last change
-                        if time.time() - last_change >= 2.0:
-                            break
-                    prev_check = curr_check
+                time.sleep(1.5)  # Let our click animation start
+
+                # Wait until our avatar STOPS animating (= opponent's turn now)
+                ref = self.crop_avatar_region(self.screenshot_for_processing())
+                for _ in range(30):  # Up to 15s
+                    time.sleep(0.5)
+                    cur = self.crop_avatar_region(self.screenshot_for_processing())
+                    if not self.avatar_changed(ref, cur):
+                        break
+                    ref = cur
+                    sys.stdout.write("~")
                     sys.stdout.flush()
+
+                # Now wait until our avatar STARTS animating again (= our turn)
+                ref = self.crop_avatar_region(self.screenshot_for_processing())
+                for _ in range(180):  # Up to 90s
+                    time.sleep(0.5)
+                    cur = self.crop_avatar_region(self.screenshot_for_processing())
+                    if self.avatar_changed(ref, cur):
+                        time.sleep(1.5)  # Let opponent's move animation finish on board
+                        break
+                    ref = cur
+
                 print(" done")
 
-                # Step 4: Click empty area to deselect any piece, then re-parse
-                # River area (row 4-5) is usually empty — click there
-                river_x = self.cols_logical[4]  # Center column
+                # Step 4: Click empty area to deselect, then re-parse
+                river_x = self.cols_logical[4]
                 river_y = (self.rows_logical[4] + self.rows_logical[5]) / 2
                 self.click(river_x, river_y)
                 time.sleep(0.5)
                 img = self.screenshot_for_processing()
                 board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
                 fen = self.board_to_fen(board)
+
+                # Print board
                 print(f"  Board → {fen}")
                 for r in range(10):
                     line = "  "
@@ -1943,6 +2148,22 @@ class Bot:
                         p = board[r][c]
                         line += f" {p}" if p else " ."
                     print(line)
+
+                # Show FEN diff from previous board
+                if last_board:
+                    col_names = "abcdefghi"
+                    diffs = []
+                    for r in range(10):
+                        for c in range(9):
+                            old_p = last_board[r][c]
+                            new_p = board[r][c]
+                            if old_p != new_p:
+                                old_s = old_p if old_p else '.'
+                                new_s = new_p if new_p else '.'
+                                diffs.append(f"({r},{c}){col_names[c]}{9-r}: {old_s}→{new_s}")
+                    if diffs:
+                        print(f"  Δ {', '.join(diffs)}")
+                last_board = [row[:] for row in board]
 
             except KeyboardInterrupt:
                 print("\nStopped."); break
