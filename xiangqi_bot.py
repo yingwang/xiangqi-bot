@@ -1867,6 +1867,20 @@ class Bot:
         y2 = int(h * 0.84)
         return img[y1:y2, x1:x2].copy()
 
+    def has_avatar(self):
+        """Check if avatar region has a colored border (normal game mode).
+        Returns False for puzzle mode (no avatar)."""
+        img = self.screenshot_for_processing()
+        avatar = self.crop_avatar_region(img)
+        h, w = avatar.shape[:2]
+        border_mask = np.ones((h, w), dtype=bool)
+        mx, my = int(w * 0.15), int(h * 0.15)
+        border_mask[my:h-my, mx:w-mx] = False
+        hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
+        # Check if border has any saturated colored pixels (green or red)
+        sat = hsv[border_mask, 1]
+        return float(sat.mean()) > 60
+
     def is_my_turn(self):
         """Check if it's our turn by detecting green in avatar border.
         Our turn: green border (~0.8% green). Opponent: red border (0% green).
@@ -1985,12 +1999,14 @@ class Bot:
         fen_history = {}  # fen -> last_move, to avoid repetition
         excluded_moves = []  # moves to exclude if position repeats
 
-        print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
+        # Detect game mode: avatar present (normal) or not (puzzle)
+        self._has_avatar = self.has_avatar()
+        print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}, {'avatar' if self._has_avatar else 'puzzle'} mode) ---\n")
 
         # Wait until it's our turn before starting (handles mid-game start too)
-        if not self.is_my_turn():
+        if self._has_avatar and not self.is_my_turn():
             print("  Waiting for our turn...", end="", flush=True)
-            for wi in range(300):  # Up to ~150s
+            for wi in range(300):
                 if self.is_my_turn():
                     break
                 if wi % 10 == 0 and wi > 0:
@@ -2009,7 +2025,7 @@ class Bot:
             last_board = [row[:] for row in board]
             print(f"  Board → {fen}")
         else:
-            print("  It's our turn, starting immediately")
+            print("  Starting immediately")
 
         while True:
             try:
@@ -2084,14 +2100,32 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait for our turn (poll green border detection)
+                # Step 3: Wait for our turn
                 print("  Waiting...", end="", flush=True)
-                for wi in range(300):  # Up to ~90s
-                    if self.is_my_turn():
-                        time.sleep(1.5)  # Let move animation finish
-                        break
-                    if wi % 10 == 0 and wi > 0:
-                        sys.stdout.write(".")
+                if self._has_avatar:
+                    # Normal mode: poll green border
+                    for wi in range(300):  # Up to ~90s
+                        if self.is_my_turn():
+                            time.sleep(1.5)  # Let move animation finish
+                            break
+                        if wi % 10 == 0 and wi > 0:
+                            sys.stdout.write(".")
+                            sys.stdout.flush()
+                else:
+                    # Puzzle mode: wait for board to stabilize (5s no change)
+                    time.sleep(1.0)
+                    last_change = time.time()
+                    prev_check = self.crop_board_region(self.screenshot_for_processing())
+                    while time.time() - last_change < 60:
+                        time.sleep(0.4)
+                        curr_check = self.crop_board_region(self.screenshot_for_processing())
+                        if self.images_changed(prev_check, curr_check):
+                            last_change = time.time()
+                            sys.stdout.write("~")
+                        else:
+                            if time.time() - last_change >= 5.0:
+                                break
+                        prev_check = curr_check
                         sys.stdout.flush()
                 print(" done")
 
