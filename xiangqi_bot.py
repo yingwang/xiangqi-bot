@@ -1868,40 +1868,23 @@ class Bot:
         return img[y1:y2, x1:x2].copy()
 
     def is_my_turn(self):
-        """Check if it's our turn by detecting walking-light animation on avatar.
-        Takes two screenshots 0.5s apart. If avatar border pixels changed, it's animating.
-        Walking light (our turn): ~0.75% pixels change. Static (opponent): 0% change."""
-        img1 = self.screenshot_for_processing()
-        time.sleep(0.5)
-        img2 = self.screenshot_for_processing()
-        a1 = self.crop_avatar_region(img1)
-        a2 = self.crop_avatar_region(img2)
-        if a1.shape != a2.shape:
-            return False
-        diff = cv2.absdiff(a1, a2)
-        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
-        changed = np.count_nonzero(gray > 10)
-        return (changed / gray.size) > 0.001  # >0.1% change = walking light active
-
-    def wait_for_avatar_change(self, timeout=90):
-        """Wait for a large color change in avatar border (turn switch).
-        Border color switch: ~7% change. Walking light: ~0.75%. Static: 0%."""
-        ref = self.crop_avatar_region(self.screenshot_for_processing())
-        for wi in range(int(timeout / 0.3)):
-            time.sleep(0.3)
-            cur = self.crop_avatar_region(self.screenshot_for_processing())
-            if ref.shape != cur.shape:
-                return True
-            diff = cv2.absdiff(ref, cur)
-            gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
-            changed = np.count_nonzero(gray > 10)
-            ratio = changed / gray.size
-            if ratio > 0.03:  # >3% = border color switched
-                return True
-            if wi % 10 == 0 and wi > 0:
-                sys.stdout.write(".")
-                sys.stdout.flush()
-        return False
+        """Check if it's our turn by detecting green in avatar border.
+        Our turn: green border (~0.8% green). Opponent: red border (0% green).
+        Single-frame check, works anytime."""
+        img = self.screenshot_for_processing()
+        avatar = self.crop_avatar_region(img)
+        h, w = avatar.shape[:2]
+        # Border-only mask: outer 15%, exclude center photo
+        border_mask = np.ones((h, w), dtype=bool)
+        mx, my = int(w * 0.15), int(h * 0.15)
+        border_mask[my:h-my, mx:w-mx] = False
+        hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
+        lower_green = np.array([35, 50, 50])
+        upper_green = np.array([85, 255, 255])
+        green_mask = cv2.inRange(hsv, lower_green, upper_green)
+        green_in_border = np.count_nonzero(green_mask[border_mask])
+        border_pixels = border_mask.sum()
+        return (green_in_border / border_pixels) > 0.005
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
@@ -2101,18 +2084,15 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait for our turn
+                # Step 3: Wait for our turn (poll green border detection)
                 print("  Waiting...", end="", flush=True)
-
-                # Phase A: Wait for border color switch (our turn → opponent's turn)
-                self.wait_for_avatar_change(timeout=15)
-                sys.stdout.write(" → opp")
-
-                # Phase B: Wait for border color switch again (opponent → our turn)
-                self.wait_for_avatar_change(timeout=90)
-                sys.stdout.write(" → us")
-                time.sleep(1.5)  # Let opponent's move animation finish on board
-
+                for wi in range(300):  # Up to ~90s
+                    if self.is_my_turn():
+                        time.sleep(1.5)  # Let move animation finish
+                        break
+                    if wi % 10 == 0 and wi > 0:
+                        sys.stdout.write(".")
+                        sys.stdout.flush()
                 print(" done")
 
                 # Step 4: Click empty area to deselect, then re-parse
