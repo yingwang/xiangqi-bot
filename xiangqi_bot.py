@@ -1867,18 +1867,18 @@ class Bot:
         y2 = int(h * 0.84)
         return img[y1:y2, x1:x2].copy()
 
-    def avatar_changed(self, img1, img2):
-        """Check if avatar region changed. Lower threshold than board comparison
-        since the walking-light border animation is subtle."""
-        if img1 is None or img2 is None:
-            return True
-        if img1.shape != img2.shape:
-            return True
-        diff = cv2.absdiff(img1, img2)
-        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
-        changed_pixels = np.count_nonzero(gray_diff > 20)
-        total_pixels = gray_diff.size
-        return (changed_pixels / total_pixels) > 0.001  # 0.1% threshold
+    def is_my_turn(self, img):
+        """Check if it's our turn by detecting bright border on our avatar.
+        Walking-light border is bright (~106 avg), inactive is dim (~16 avg)."""
+        avatar = self.crop_avatar_region(img)
+        h, w = avatar.shape[:2]
+        # Extract border ring (outer 15%)
+        mask = np.ones((h, w), dtype=bool)
+        mx, my = int(w * 0.15), int(h * 0.15)
+        mask[my:h-my, mx:w-mx] = False
+        hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
+        border_val = hsv[mask, 2]  # V channel = brightness
+        return float(border_val.mean()) > 50  # bright = our turn
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
@@ -2104,31 +2104,20 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait for our turn by monitoring avatar animation
+                # Step 3: Wait for our turn by checking green border on avatar
                 print("  Waiting...", end="", flush=True)
-                time.sleep(1.5)  # Let our click animation start
+                time.sleep(1.5)  # Let our move animation start
 
-                # Wait until our avatar STOPS animating (= opponent's turn now)
-                ref = self.crop_avatar_region(self.screenshot_for_processing())
-                for _ in range(30):  # Up to 15s
-                    time.sleep(0.5)
-                    cur = self.crop_avatar_region(self.screenshot_for_processing())
-                    if not self.avatar_changed(ref, cur):
-                        break
-                    ref = cur
-                    sys.stdout.write("~")
-                    sys.stdout.flush()
-
-                # Now wait until our avatar STARTS animating again (= our turn)
-                # Keep comparing against the FIXED static reference (don't update ref)
-                # so any animation change is detected even if subtle between consecutive frames
-                ref = self.crop_avatar_region(self.screenshot_for_processing())
-                for _ in range(300):  # Up to 90s
+                # Poll until green border appears (= our turn)
+                for wi in range(300):  # Up to 90s
                     time.sleep(0.3)
-                    cur = self.crop_avatar_region(self.screenshot_for_processing())
-                    if self.avatar_changed(ref, cur):
+                    img_check = self.screenshot_for_processing()
+                    if self.is_my_turn(img_check):
                         time.sleep(1.5)  # Let opponent's move animation finish on board
                         break
+                    if wi % 10 == 0 and wi > 0:
+                        sys.stdout.write(".")
+                        sys.stdout.flush()
 
                 print(" done")
 
