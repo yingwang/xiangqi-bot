@@ -1883,6 +1883,26 @@ class Bot:
         changed = np.count_nonzero(gray > 10)
         return (changed / gray.size) > 0.001  # >0.1% change = walking light active
 
+    def wait_for_avatar_change(self, timeout=90):
+        """Wait for a large color change in avatar border (turn switch).
+        Border color switch: ~7% change. Walking light: ~0.75%. Static: 0%."""
+        ref = self.crop_avatar_region(self.screenshot_for_processing())
+        for wi in range(int(timeout / 0.3)):
+            time.sleep(0.3)
+            cur = self.crop_avatar_region(self.screenshot_for_processing())
+            if ref.shape != cur.shape:
+                return True
+            diff = cv2.absdiff(ref, cur)
+            gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
+            changed = np.count_nonzero(gray > 10)
+            ratio = changed / gray.size
+            if ratio > 0.03:  # >3% = border color switched
+                return True
+            if wi % 10 == 0 and wi > 0:
+                sys.stdout.write(".")
+                sys.stdout.flush()
+        return False
+
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
         if not os.path.exists(PIKAFISH):
@@ -2084,23 +2104,14 @@ class Bot:
                 # Step 3: Wait for our turn
                 print("  Waiting...", end="", flush=True)
 
-                # Phase A: Wait for walking light to turn OFF (our turn ending)
-                for _ in range(30):  # Up to 9s
-                    time.sleep(0.3)
-                    if not self.is_my_turn():
-                        break
-                    sys.stdout.write("~")
-                    sys.stdout.flush()
+                # Phase A: Wait for border color switch (our turn → opponent's turn)
+                self.wait_for_avatar_change(timeout=15)
+                sys.stdout.write(" → opp")
 
-                # Phase B: Wait for walking light to turn ON (our turn again)
-                for wi in range(300):  # Up to 90s
-                    time.sleep(0.3)
-                    if self.is_my_turn():
-                        time.sleep(1.5)  # Let opponent's move animation finish on board
-                        break
-                    if wi % 10 == 0 and wi > 0:
-                        sys.stdout.write(".")
-                        sys.stdout.flush()
+                # Phase B: Wait for border color switch again (opponent → our turn)
+                self.wait_for_avatar_change(timeout=90)
+                sys.stdout.write(" → us")
+                time.sleep(1.5)  # Let opponent's move animation finish on board
 
                 print(" done")
 
