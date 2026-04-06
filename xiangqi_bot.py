@@ -1868,19 +1868,16 @@ class Bot:
         return img[y1:y2, x1:x2].copy()
 
     def is_my_turn(self, img):
-        """Check if it's our turn by detecting walking-light border on avatar.
-        Walking light: bright border with color variation (val_std ~22, val_mean ~106).
-        Inactive: dim uniform border (val_std ~4, val_mean ~16)."""
+        """Check if it's our turn by detecting green in avatar border.
+        Our turn: green walking-light (~0.8% green pixels).
+        Opponent turn: red/other border (0% green pixels)."""
         avatar = self.crop_avatar_region(img)
-        h, w = avatar.shape[:2]
-        # Extract border ring (outer 15%)
-        mask = np.ones((h, w), dtype=bool)
-        mx, my = int(w * 0.15), int(h * 0.15)
-        mask[my:h-my, mx:w-mx] = False
         hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
-        border_val = hsv[mask, 2]  # V channel = brightness
-        # Walking light is both bright AND has color variation (two colors)
-        return float(border_val.mean()) > 50 and float(border_val.std()) > 10
+        lower_green = np.array([35, 50, 50])
+        upper_green = np.array([85, 255, 255])
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+        green_ratio = np.count_nonzero(mask) / mask.size
+        return green_ratio > 0.003  # >0.3% green pixels = our turn
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
