@@ -1857,9 +1857,7 @@ class Bot:
         return change_ratio > 0.005
 
     def crop_avatar_region(self, img):
-        """Crop our avatar region for turn detection.
-        The avatar border animates (walking light) when it's our turn.
-        Our avatar is always at bottom-right regardless of color."""
+        """Crop our avatar region (bottom-right)."""
         h, w = img.shape[:2]
         x1 = int(w * 0.76)
         y1 = int(h * 0.68)
@@ -1867,14 +1865,18 @@ class Bot:
         y2 = int(h * 0.84)
         return img[y1:y2, x1:x2].copy()
 
-    def is_my_turn(self):
-        """Check if it's our turn by detecting green in avatar border.
-        Our turn: green border (~0.8% green). Opponent: red border (0% green).
-        Single-frame check, works anytime."""
-        img = self.screenshot_for_processing()
-        avatar = self.crop_avatar_region(img)
+    def crop_opponent_avatar_region(self, img):
+        """Crop opponent avatar region (left side, upper area)."""
+        h, w = img.shape[:2]
+        x1 = int(w * 0.12)
+        y1 = int(h * 0.15)
+        x2 = int(w * 0.22)
+        y2 = int(h * 0.38)
+        return img[y1:y2, x1:x2].copy()
+
+    def _check_green_border(self, avatar):
+        """Check green pixel ratio in avatar border region."""
         h, w = avatar.shape[:2]
-        # Border-only mask: outer 15%, exclude center photo
         border_mask = np.ones((h, w), dtype=bool)
         mx, my = int(w * 0.15), int(h * 0.15)
         border_mask[my:h-my, mx:w-mx] = False
@@ -1884,7 +1886,16 @@ class Bot:
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
         green_in_border = np.count_nonzero(green_mask[border_mask])
         border_pixels = border_mask.sum()
-        return (green_in_border / border_pixels) > 0.005
+        return (green_in_border / border_pixels)
+
+    def is_my_turn(self):
+        """Check if it's our turn using dual avatar detection.
+        Our turn: our border green + opponent border not green.
+        Opponent turn: our border not green + opponent border green."""
+        img = self.screenshot_for_processing()
+        my_green = self._check_green_border(self.crop_avatar_region(img))
+        opp_green = self._check_green_border(self.crop_opponent_avatar_region(img))
+        return my_green > 0.005 and opp_green < 0.01
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
