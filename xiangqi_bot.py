@@ -1868,16 +1868,21 @@ class Bot:
         return img[y1:y2, x1:x2].copy()
 
     def is_my_turn(self, img):
-        """Check if it's our turn by detecting green in avatar border.
-        Our turn: green walking-light (~0.8% green pixels).
-        Opponent turn: red/other border (0% green pixels)."""
+        """Check if it's our turn by detecting green in avatar border only.
+        Our turn: green walking-light. Opponent turn: red border."""
         avatar = self.crop_avatar_region(img)
+        h, w = avatar.shape[:2]
+        # Border-only mask: outer 15%, exclude center (avatar photo)
+        border_mask = np.ones((h, w), dtype=bool)
+        mx, my = int(w * 0.15), int(h * 0.15)
+        border_mask[my:h-my, mx:w-mx] = False
         hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
         lower_green = np.array([35, 50, 50])
         upper_green = np.array([85, 255, 255])
-        mask = cv2.inRange(hsv, lower_green, upper_green)
-        green_ratio = np.count_nonzero(mask) / mask.size
-        return green_ratio > 0.003  # >0.3% green pixels = our turn
+        green_mask = cv2.inRange(hsv, lower_green, upper_green)
+        green_in_border = np.count_nonzero(green_mask[border_mask])
+        border_pixels = border_mask.sum()
+        return (green_in_border / border_pixels) > 0.005  # >0.5% green in border
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
