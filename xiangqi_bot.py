@@ -1868,8 +1868,9 @@ class Bot:
         return img[y1:y2, x1:x2].copy()
 
     def is_my_turn(self, img):
-        """Check if it's our turn by detecting bright border on our avatar.
-        Walking-light border is bright (~106 avg), inactive is dim (~16 avg)."""
+        """Check if it's our turn by detecting walking-light border on avatar.
+        Walking light: bright border with color variation (val_std ~22, val_mean ~106).
+        Inactive: dim uniform border (val_std ~4, val_mean ~16)."""
         avatar = self.crop_avatar_region(img)
         h, w = avatar.shape[:2]
         # Extract border ring (outer 15%)
@@ -1878,7 +1879,8 @@ class Bot:
         mask[my:h-my, mx:w-mx] = False
         hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
         border_val = hsv[mask, 2]  # V channel = brightness
-        return float(border_val.mean()) > 50  # bright = our turn
+        # Walking light is both bright AND has color variation (two colors)
+        return float(border_val.mean()) > 50 and float(border_val.std()) > 10
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
@@ -2104,15 +2106,21 @@ class Bot:
                     print(f"  Re-parsed → {fen}")
                     continue
 
-                # Step 3: Wait for our turn by checking green border on avatar
+                # Step 3: Wait for our turn
                 print("  Waiting...", end="", flush=True)
-                time.sleep(1.5)  # Let our move animation start
 
-                # Poll until green border appears (= our turn)
+                # Phase A: Wait for walking light to turn OFF (our turn ending)
+                for _ in range(30):  # Up to 9s
+                    time.sleep(0.3)
+                    if not self.is_my_turn(self.screenshot_for_processing()):
+                        break
+                    sys.stdout.write("~")
+                    sys.stdout.flush()
+
+                # Phase B: Wait for walking light to turn ON (our turn again)
                 for wi in range(300):  # Up to 90s
                     time.sleep(0.3)
-                    img_check = self.screenshot_for_processing()
-                    if self.is_my_turn(img_check):
+                    if self.is_my_turn(self.screenshot_for_processing()):
                         time.sleep(1.5)  # Let opponent's move animation finish on board
                         break
                     if wi % 10 == 0 and wi > 0:
