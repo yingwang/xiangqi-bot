@@ -1984,55 +1984,29 @@ class Bot:
 
         print(f"\n--- Game loop (playing {'RED' if self.playing_red else 'BLACK'}) ---\n")
 
-        # If playing black, wait for red's first move before starting
-        INITIAL_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR"
-        if not self.playing_red:
-            if fen != INITIAL_FEN:
-                # Opponent already moved during initialization
-                print("  Opponent already moved (detected during init)")
-            else:
-                # Board is still initial position — wait for opponent's first move
-                print("  Waiting for opponent's first move...", end="", flush=True)
-                ref = self.crop_board_region(img)  # use initial screenshot as reference
-                while True:
-                    time.sleep(0.5)
-                    curr = self.crop_board_region(self.screenshot_for_processing())
-                    if self.images_changed(ref, curr):
-                        # Board changed — wait for it to settle
-                        sys.stdout.write("~")
-                        sys.stdout.flush()
-                        time.sleep(2.0)
-                        # Check if still settling
-                        prev = self.crop_board_region(self.screenshot_for_processing())
-                        settled = False
-                        for _ in range(10):
-                            time.sleep(0.5)
-                            check = self.crop_board_region(self.screenshot_for_processing())
-                            if not self.images_changed(prev, check):
-                                settled = True
-                                break
-                            prev = check
-                            sys.stdout.write("~")
-                            sys.stdout.flush()
-                        if settled:
-                            break
-                        ref = self.crop_board_region(self.screenshot_for_processing())
-                print(" done")
-                # Click empty area to deselect, then re-parse
-                river_x = self.cols_logical[4]
-                river_y = (self.rows_logical[4] + self.rows_logical[5]) / 2
-                self.click(river_x, river_y)
-                time.sleep(0.5)
-                img = self.screenshot_for_processing()
-                board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
-                fen = self.board_to_fen(board)
-                print(f"  Opponent moved → {fen}")
-                for r in range(10):
-                    line = "  "
-                    for c in range(9):
-                        p = board[r][c]
-                        line += f" {p}" if p else " ."
-                    print(line)
+        # Wait until it's our turn before starting (handles mid-game start too)
+        if not self.is_my_turn():
+            print("  Waiting for our turn...", end="", flush=True)
+            for wi in range(300):  # Up to ~150s
+                if self.is_my_turn():
+                    break
+                if wi % 10 == 0 and wi > 0:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+            print(" done")
+            # Re-parse board after opponent moved
+            time.sleep(1.5)
+            river_x = self.cols_logical[4]
+            river_y = (self.rows_logical[4] + self.rows_logical[5]) / 2
+            self.click(river_x, river_y)
+            time.sleep(0.5)
+            img = self.screenshot_for_processing()
+            board = self.parse_board_cnn(img) if self.cnn else self.parse_board(img)
+            fen = self.board_to_fen(board)
+            last_board = [row[:] for row in board]
+            print(f"  Board → {fen}")
+        else:
+            print("  It's our turn, starting immediately")
 
         while True:
             try:
