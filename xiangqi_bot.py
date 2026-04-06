@@ -2120,14 +2120,15 @@ class Bot:
                     sys.stdout.flush()
 
                 # Now wait until our avatar STARTS animating again (= our turn)
+                # Keep comparing against the FIXED static reference (don't update ref)
+                # so any animation change is detected even if subtle between consecutive frames
                 ref = self.crop_avatar_region(self.screenshot_for_processing())
-                for _ in range(180):  # Up to 90s
-                    time.sleep(0.5)
+                for _ in range(300):  # Up to 90s
+                    time.sleep(0.3)
                     cur = self.crop_avatar_region(self.screenshot_for_processing())
                     if self.avatar_changed(ref, cur):
                         time.sleep(1.5)  # Let opponent's move animation finish on board
                         break
-                    ref = cur
 
                 print(" done")
 
