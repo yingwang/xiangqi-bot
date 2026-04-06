@@ -1867,22 +1867,21 @@ class Bot:
         y2 = int(h * 0.84)
         return img[y1:y2, x1:x2].copy()
 
-    def is_my_turn(self, img):
-        """Check if it's our turn by detecting green in avatar border only.
-        Our turn: green walking-light. Opponent turn: red border."""
-        avatar = self.crop_avatar_region(img)
-        h, w = avatar.shape[:2]
-        # Border-only mask: outer 15%, exclude center (avatar photo)
-        border_mask = np.ones((h, w), dtype=bool)
-        mx, my = int(w * 0.15), int(h * 0.15)
-        border_mask[my:h-my, mx:w-mx] = False
-        hsv = cv2.cvtColor(avatar, cv2.COLOR_BGR2HSV)
-        lower_green = np.array([35, 50, 50])
-        upper_green = np.array([85, 255, 255])
-        green_mask = cv2.inRange(hsv, lower_green, upper_green)
-        green_in_border = np.count_nonzero(green_mask[border_mask])
-        border_pixels = border_mask.sum()
-        return (green_in_border / border_pixels) > 0.005  # >0.5% green in border
+    def is_my_turn(self):
+        """Check if it's our turn by detecting walking-light animation on avatar.
+        Takes two screenshots 0.5s apart. If avatar border pixels changed, it's animating.
+        Walking light (our turn): ~0.25% pixels change. Static (opponent): 0% change."""
+        img1 = self.screenshot_for_processing()
+        time.sleep(0.5)
+        img2 = self.screenshot_for_processing()
+        a1 = self.crop_avatar_region(img1)
+        a2 = self.crop_avatar_region(img2)
+        if a1.shape != a2.shape:
+            return False
+        diff = cv2.absdiff(a1, a2)
+        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if len(diff.shape) == 3 else diff
+        changed = np.count_nonzero(gray > 15)
+        return (changed / gray.size) > 0.001  # >0.1% change = walking light active
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
@@ -2114,7 +2113,7 @@ class Bot:
                 # Phase A: Wait for walking light to turn OFF (our turn ending)
                 for _ in range(30):  # Up to 9s
                     time.sleep(0.3)
-                    if not self.is_my_turn(self.screenshot_for_processing()):
+                    if not self.is_my_turn():
                         break
                     sys.stdout.write("~")
                     sys.stdout.flush()
@@ -2122,7 +2121,7 @@ class Bot:
                 # Phase B: Wait for walking light to turn ON (our turn again)
                 for wi in range(300):  # Up to 90s
                     time.sleep(0.3)
-                    if self.is_my_turn(self.screenshot_for_processing()):
+                    if self.is_my_turn():
                         time.sleep(1.5)  # Let opponent's move animation finish on board
                         break
                     if wi % 10 == 0 and wi > 0:
