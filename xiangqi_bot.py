@@ -1889,13 +1889,9 @@ class Bot:
         return (green_in_border / border_pixels)
 
     def is_my_turn(self):
-        """Check if it's our turn using dual avatar detection.
-        Our turn: our border green + opponent border not green.
-        Opponent turn: our border not green + opponent border green."""
+        """Check if it's our turn by detecting green in our avatar border."""
         img = self.screenshot_for_processing()
-        my_green = self._check_green_border(self.crop_avatar_region(img))
-        opp_green = self._check_green_border(self.crop_opponent_avatar_region(img))
-        return my_green > 0.005 and opp_green < 0.01
+        return self._check_green_border(self.crop_avatar_region(img)) > 0.005
 
     def run(self):
         print("=== Xiangqi Bot (Pikafish) ===\n")
