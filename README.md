@@ -5,7 +5,7 @@ Auto-play Chinese chess (天天象棋) on macOS using Pikafish engine + CNN visi
 ## How it works
 
 1. **Pikafish** (~3000 Elo) calculates the best move
-2. **CNN classifier** (PyTorch, 15-class, 99.8% val accuracy) identifies pieces from screenshots
+2. **CNN classifier** (PyTorch, 15-class, 100% val accuracy) identifies pieces from screenshots
 3. **FEN validation** enforces piece count rules and auto-corrects misclassifications using confidence scores
 4. **Double-shot parsing** takes a second screenshot when confidence is low, averages probabilities to handle animation artifacts
 5. **Quartz CGEvent** clicks to execute moves
@@ -62,6 +62,14 @@ Supports both red and black sides. Auto-detects orientation from king position.
 
 Training data is auto-collected during gameplay. Debug patches are saved to `debug/` organized by piece type for easy review.
 
+### Data augmentation
+
+The augmentation pipeline generates variants per original image:
+- **Brightness** (0.8x, 1.2x)
+- **Shift** (2px jitter in 4 directions)
+- **Scale** (0.85x, 1.15x, 1.25x — simulates selected/enlarged pieces)
+- **Low-resolution** (downscale to 20/24/30px then upscale — simulates small board blurriness)
+
 ### Improve accuracy
 
 1. Play a game — debug patches auto-save to `debug/`
@@ -70,6 +78,7 @@ Training data is auto-collected during gameplay. Debug patches are saved to `deb
 4. Retrain:
 
 ```bash
+python3 xiangqi_cnn.py augment   # regenerate augmented data
 python3 xiangqi_cnn.py train --epochs 30
 ```
 
@@ -77,7 +86,7 @@ python3 xiangqi_cnn.py train --epochs 30
 
 ```bash
 python3 xiangqi_cnn.py collect   # Collect from initial position
-python3 xiangqi_cnn.py augment   # Augment data (brightness, shift, rotation, scale)
+python3 xiangqi_cnn.py augment   # Augment data (brightness, shift, scale, low-res simulation)
 python3 xiangqi_cnn.py test      # Test on current board
 ```
 
