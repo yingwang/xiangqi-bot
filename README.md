@@ -90,13 +90,36 @@ python3 xiangqi_cnn.py augment   # Augment data (brightness, shift, scale, low-r
 python3 xiangqi_cnn.py test      # Test on current board
 ```
 
+## macOS App
+
+A native macOS GUI (`天天象棋Bot.app`) with board display, move history (四字记录法), and start/stop controls.
+
+### Build
+
+```bash
+pip install pyinstaller
+python3 -m PyInstaller xiangqi_bot.spec --noconfirm
+```
+
+The app is output to `dist/天天象棋Bot.app`. It bundles Pikafish, the ONNX model, and all Python dependencies.
+
+### Run directly (without building)
+
+```bash
+python3 app.py
+```
+
 ## Files
 
 | File | Description |
 |------|-------------|
-| `xiangqi_bot.py` | Main bot (game loop, move execution, double-shot parsing) |
+| `app.py` | macOS GUI app (AppKit/PyObjC, board view, move history) |
+| `xiangqi_bot.py` | Bot engine (game loop, move execution, double-shot parsing) |
 | `xiangqi_cnn.py` | CNN model, training, inference, FEN validation |
-| `xiangqi_cnn.pt` | Trained model weights |
+| `xiangqi_cnn_onnx.py` | ONNX inference wrapper (no PyTorch needed) |
+| `xiangqi_cnn.onnx` | Trained model weights (ONNX format) |
+| `xiangqi_bot.spec` | PyInstaller build spec for macOS app |
+| `hook-cv2.py` | PyInstaller runtime hook for OpenCV |
 | `pikafish` | Pikafish engine binary (macOS x86_64) |
 | `pikafish.nnue` | Neural network evaluation file for Pikafish |
 | `cnn_data/` | Training data by piece type (`red_R/`, `black_r/`, `empty/`, etc.) |
