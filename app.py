@@ -700,9 +700,13 @@ class AppDelegate(NSObject):
             storage.appendAttributedString_(sep)
 
             # Black move (always output fixed width to keep eval aligned)
-            black_str = r['black'] if r['black'] else '        '
-            black_as = NSAttributedString.alloc().initWithString_attributes_(
-                f"{black_str:<8s}", black_attrs if r['black'] else gray_attrs)
+            if r['black']:
+                black_as = NSAttributedString.alloc().initWithString_attributes_(
+                    f"{r['black']:<8s}", black_attrs)
+            else:
+                # Use full-width spaces in same font to match CJK char width
+                black_as = NSAttributedString.alloc().initWithString_attributes_(
+                    "\u3000\u3000\u3000\u3000    ", black_attrs)
             storage.appendAttributedString_(black_as)
 
             # Eval (always at far right)
