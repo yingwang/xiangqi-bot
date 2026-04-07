@@ -175,12 +175,6 @@ def augment_data():
                 aug = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
                 cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_sh{i}.png"), aug)
 
-            # Slight rotation
-            for i, angle in enumerate([-3, 3]):
-                M = cv2.getRotationMatrix2D((img.shape[1]//2, img.shape[0]//2), angle, 1)
-                aug = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
-                cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_rot{i}.png"), aug)
-
             # Scale variations (simulate selected/enlarged piece)
             h, w = img.shape[:2]
             for i, scale in enumerate([1.15, 1.25, 0.85]):
@@ -197,6 +191,13 @@ def augment_data():
                     x0 = (w - sw) // 2
                     aug[y0:y0+sh, x0:x0+sw] = scaled
                 cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_sc{i}.png"), aug)
+
+            # Low-resolution simulation (small board → blurry patches)
+            h, w = img.shape[:2]
+            for i, small_size in enumerate([20, 24, 30]):
+                small = cv2.resize(img, (small_size, small_size), interpolation=cv2.INTER_AREA)
+                aug = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+                cv2.imwrite(os.path.join(cls_dir, f"{base}_aug_lr{i}.png"), aug)
 
 
 # --- Training ---
