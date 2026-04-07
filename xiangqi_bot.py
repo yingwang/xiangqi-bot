@@ -67,6 +67,7 @@ class Bot:
         self.win_x = 0
         self.win_y = 0
         self.cnn = None  # CNN classifier (loaded on demand)
+        self.stop_flag = False  # Set to True to stop the bot
 
     # --- Window & Screenshot ---
 
@@ -1583,14 +1584,25 @@ class Bot:
         return [(self.cols_logical[c], self.rows_logical[r]) for c, r in s]
 
     def load_cnn(self):
-        """Load CNN piece classifier if available."""
+        """Load CNN piece classifier if available (prefers ONNX over PyTorch)."""
         if self.cnn:
             return True
+        # Try ONNX first (faster startup, no PyTorch needed)
+        try:
+            from xiangqi_cnn_onnx import PieceClassifierCNN as OnnxClassifier
+            onnx_path = os.path.join(_SCRIPT_DIR, 'xiangqi_cnn.onnx')
+            if os.path.exists(onnx_path):
+                self.cnn = OnnxClassifier(onnx_path)
+                print("  CNN model loaded! (ONNX)")
+                return True
+        except Exception as e:
+            print(f"  ONNX not available: {e}")
+        # Fall back to PyTorch
         try:
             from xiangqi_cnn import PieceClassifierCNN, MODEL_PATH
             if os.path.exists(MODEL_PATH):
                 self.cnn = PieceClassifierCNN(MODEL_PATH)
-                print("  CNN model loaded!")
+                print("  CNN model loaded! (PyTorch)")
                 return True
         except Exception as e:
             print(f"  CNN not available: {e}")
@@ -1642,7 +1654,10 @@ class Bot:
                 debug_prefix=f"s{step:03d}b_")
 
             # Average probabilities for low-confidence cells
-            from xiangqi_cnn import CLASSES
+            try:
+                from xiangqi_cnn_onnx import CLASSES
+            except ImportError:
+                from xiangqi_cnn import CLASSES
             changes = 0
             for r in range(10):
                 for c in range(9):
@@ -1998,6 +2013,9 @@ class Bot:
         if not self.is_my_turn():
             print("  Waiting for our turn...", end="", flush=True)
             for wi in range(300):  # Up to ~150s
+                if self.stop_flag:
+                    print(" stopped")
+                    return
                 if self.is_my_turn():
                     break
                 if wi % 10 == 0 and wi > 0:
@@ -2018,7 +2036,7 @@ class Bot:
         else:
             print("  It's our turn, starting immediately")
 
-        while True:
+        while not self.stop_flag:
             try:
                 # Step 1: Ask pikafish for best move
                 full_fen = f"{fen} {turn} - - 0 1"
@@ -2052,6 +2070,18 @@ class Bot:
                 sc = self.score_str(info)
                 print(f"[{n}] {best} ({sc})")
 
+                # Apply our move to last_board so Δ only shows opponent's changes
+                fc, fr = ord(best[0]) - ord('a'), int(best[1])
+                tc, tr = ord(best[2]) - ord('a'), int(best[3])
+                if self.playing_red:
+                    b_fr, b_fc = 9 - fr, fc
+                    b_tr, b_tc = 9 - tr, tc
+                else:
+                    b_fr, b_fc = fr, 8 - fc
+                    b_tr, b_tc = tr, 8 - tc
+                last_board[b_tr][b_tc] = last_board[b_fr][b_fc]
+                last_board[b_fr][b_fc] = None
+
                 # Step 2: Click our move (with retry)
                 pts = self.uci_to_logical(best)
                 before_crop = self.crop_board_region(self.screenshot_for_processing())
@@ -2076,6 +2106,8 @@ class Bot:
                     print("  Click failed — waiting for board change...")
                     ref = self.crop_board_region(self.screenshot_for_processing())
                     for wi in range(60):
+                        if self.stop_flag:
+                            return
                         time.sleep(0.5)
                         curr = self.screenshot_for_processing()
                         if self.images_changed(ref, self.crop_board_region(curr)):
@@ -2094,6 +2126,9 @@ class Bot:
                 # Step 3: Wait for our turn (poll green border detection)
                 print("  Waiting...", end="", flush=True)
                 for wi in range(300):  # Up to ~90s
+                    if self.stop_flag:
+                        print(" stopped")
+                        return
                     if self.is_my_turn():
                         time.sleep(1.5)  # Let move animation finish
                         break
