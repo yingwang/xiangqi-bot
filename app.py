@@ -24,6 +24,7 @@ from Foundation import (
 from AppKit import (
     NSApplication, NSWindow, NSButton, NSTextField, NSScrollView, NSTextView,
     NSFont, NSColor, NSMakeRect, NSApp, NSBox, NSView, NSBezierPath,
+    NSPopUpButton,
     NSWindowStyleMaskTitled, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
     NSBackingStoreBuffered, NSBezelStyleRounded,
     NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight,
@@ -364,13 +365,25 @@ class AppDelegate(NSObject):
         ry = board_y
 
         # Info box
-        infoBox = NSBox.alloc().initWithFrame_(NSMakeRect(rx, ry + board_size - 140, rw, 140))
+        infoBox = NSBox.alloc().initWithFrame_(NSMakeRect(rx, ry + board_size - 170, rw, 170))
         infoBox.setTitle_("信息")
         infoBox.setTitleFont_(NSFont.boldSystemFontOfSize_(11))
         content.addSubview_(infoBox)
         ic = infoBox.contentView()
 
-        y = 95
+        y = 125
+        ic.addSubview_(self._label(NSMakeRect(8, y, 60, 18), "水平:", NSFont.boldSystemFontOfSize_(11),
+                                   NSColor.darkGrayColor(), NSTextAlignmentLeft))
+        self.skillPopup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(68, y - 2, 130, 22), False)
+        self.skillPopup.setFont_(NSFont.systemFontOfSize_(11))
+        skill_levels = ["无限 — 最强", "12 — 大师", "8 — 业余强", "5 — 业余中", "3 — 业余弱"]
+        for item in skill_levels:
+            self.skillPopup.addItemWithTitle_(item)
+        self.skillPopup.setTarget_(self)
+        self.skillPopup.setAction_("skillChanged:")
+        ic.addSubview_(self.skillPopup)
+
+        y -= 24
         ic.addSubview_(self._label(NSMakeRect(8, y, 60, 18), "执棋:", NSFont.boldSystemFontOfSize_(11),
                                    NSColor.darkGrayColor(), NSTextAlignmentLeft))
         self.sideLabel = self._label(NSMakeRect(68, y, 200, 18), "—",
@@ -399,14 +412,14 @@ class AppDelegate(NSObject):
         ic.addSubview_(self.moveInfoLabel)
 
         # History box
-        histBox = NSBox.alloc().initWithFrame_(NSMakeRect(rx, ry, rw, board_size - 150))
+        histBox = NSBox.alloc().initWithFrame_(NSMakeRect(rx, ry, rw, board_size - 180))
         histBox.setTitle_("走棋记录")
         histBox.setTitleFont_(NSFont.boldSystemFontOfSize_(11))
         content.addSubview_(histBox)
 
-        histScroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(5, 5, rw - 14, board_size - 180))
+        histScroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(5, 5, rw - 14, board_size - 210))
         histScroll.setHasVerticalScroller_(True)
-        self.histView = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, rw - 18, board_size - 180))
+        self.histView = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, rw - 18, board_size - 210))
         self.histView.setFont_(NSFont.fontWithName_size_("Menlo", 11))
         self.histView.setEditable_(False)
         self.histView.setBackgroundColor_(NSColor.whiteColor())
@@ -736,6 +749,13 @@ class AppDelegate(NSObject):
             msg = self.log_buffer.pop(0)
             self._parse_and_update(msg)
             self._append_log(msg)
+
+    def skillChanged_(self, sender):
+        title = sender.titleOfSelectedItem()
+        token = title.split()[0]
+        import xiangqi_bot
+        xiangqi_bot.SEARCH_DEPTH = 0 if token == "无限" else int(token)
+        self.log_msg(f"水平设置为: {title}")
 
     def toggle_(self, sender):
         if self.running:

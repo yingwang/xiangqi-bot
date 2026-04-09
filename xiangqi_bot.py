@@ -27,6 +27,7 @@ TEMPLATE_DIR = os.path.join(_SCRIPT_DIR, "templates")
 SCREENSHOT_PATH = os.path.join(_SCRIPT_DIR, "screen.png")
 CALIB_PATH = os.path.join(_SCRIPT_DIR, "calib.json")
 MOVE_TIME_MS = 500  # Fast for real games with time pressure
+SEARCH_DEPTH = 0    # 0 = unlimited (use movetime), >0 = limit search depth
 
 # Initial board layouts (screen space)
 INIT_RED = [
@@ -1803,12 +1804,15 @@ class Bot:
         else:
             pos_cmd = f"position fen {fen}\n"
         # Get all legal moves, exclude repetition moves
-        go_cmd = f"go movetime {MOVE_TIME_MS}"
+        if SEARCH_DEPTH > 0:
+            go_cmd = f"go depth {SEARCH_DEPTH}"
+        else:
+            go_cmd = f"go movetime {MOVE_TIME_MS}"
         if excluded:
             legal = self.get_legal_moves(fen)
             allowed = [m for m in legal if m not in excluded]
             if allowed:
-                go_cmd = f"go movetime {MOVE_TIME_MS} searchmoves {' '.join(allowed)}"
+                go_cmd += f" searchmoves {' '.join(allowed)}"
         try:
             proc.stdin.write(f"uci\nisready\n{pos_cmd}{go_cmd}\n")
             proc.stdin.flush()
@@ -1961,7 +1965,7 @@ class Bot:
         import shutil
         dbg_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
         if os.path.exists(dbg_root):
-            shutil.rmtree(dbg_root)
+            shutil.rmtree(dbg_root, ignore_errors=True)
         self._debug_step = 0
         print(f"  Debug patches dir: {dbg_root}")
 
