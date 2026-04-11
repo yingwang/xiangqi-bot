@@ -8,7 +8,6 @@ import os
 import sys
 import re
 import math
-import time
 
 # Fix OpenCV recursion in PyInstaller
 sys.path[:] = [p for p in sys.path if 'cv2' not in p]
@@ -314,7 +313,6 @@ class AppDelegate(NSObject):
         self.running = False
         self.bot = None
         self.bot_thread = None
-        self.session_thread = None
         self.log_buffer = []
         self.move_num = 0
         self.board_lines = []
@@ -781,7 +779,7 @@ class AppDelegate(NSObject):
         self.histView.setString_("")
         self.log_msg("正在初始化 Bot...")
 
-        self.bot_thread = threading.Thread(target=self._run_bot_supervisor, daemon=True)
+        self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
         self.bot_thread.start()
 
     def stop(self):
@@ -852,234 +850,6 @@ class AppDelegate(NSObject):
             sys.stdout = old_stdout
             if self.running:
                 self.status.setStringValue_("对局结束")
-                self.stop()
-
-        except Exception as e:
-            sys.stdout = sys.__stdout__
-            self.log_msg(f"错误: {e}")
-            self.status.setStringValue_(f"出错了: {e}")
-            self.stop()
-
-    @objc.python_method
-    def _setup_bot_runtime(self):
-        # Fix cv2 recursion — always clean path before any imports
-        sys.path[:] = [p for p in sys.path if 'cv2' not in p.split(os.sep)]
-        if 'cv2' not in sys.modules:
-            import cv2  # noqa
-
-        # Clean bot module so it re-reads fresh state on restart
-        for key in list(sys.modules.keys()):
-            if key == 'xiangqi_bot':
-                del sys.modules[key]
-
-        # Replace xiangqi_cnn with ONNX version
-        if BUNDLE_DIR not in sys.path:
-            sys.path.insert(0, BUNDLE_DIR)
-        import xiangqi_cnn_onnx
-        import types
-        fake_cnn = types.ModuleType('xiangqi_cnn')
-        fake_cnn.PieceClassifierCNN = xiangqi_cnn_onnx.PieceClassifierCNN
-        fake_cnn.CLASSES = xiangqi_cnn_onnx.CLASSES
-        fake_cnn.CLASS_TO_IDX = xiangqi_cnn_onnx.CLASS_TO_IDX
-        fake_cnn.PIECE_TO_DIR = {
-            '_': 'empty',
-            'R': 'red_R', 'N': 'red_N', 'B': 'red_B', 'A': 'red_A',
-            'K': 'red_K', 'C': 'red_C', 'P': 'red_P',
-            'r': 'black_r', 'n': 'black_n', 'b': 'black_b', 'a': 'black_a',
-            'k': 'black_k', 'c': 'black_c', 'p': 'black_p',
-        }
-        fake_cnn.MODEL_PATH = os.path.join(BUNDLE_DIR, 'xiangqi_cnn.onnx')
-        fake_cnn.collect_from_screenshot = lambda *a, **kw: 0
-        sys.modules['xiangqi_cnn'] = fake_cnn
-
-        from xiangqi_bot import Bot
-        return Bot
-
-    @objc.python_method
-    def _run_single_game(self, bot):
-        try:
-            bot.run()
-        except KeyboardInterrupt:
-            pass
-        except Exception as e:
-            self.log_msg(f"错误: {e}")
-
-    @objc.python_method
-    def _quiet_call(self, fn, *args, **kwargs):
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            sys.stdout = old_stdout
-
-    @objc.python_method
-    def _click_relative(self, bot, rx, ry):
-        x = bot.win_x + rx * bot._get_window_width()
-        y = bot.win_y + ry * bot._get_window_height()
-        bot.click(x, y)
-
-    @objc.python_method
-    def _ensure_supervisor_ready(self, bot):
-        bot.find_window()
-        if not bot.load_cnn():
-            return False
-        if bot.cols_logical and bot.rows_logical:
-            return True
-        if bot.load_calibration():
-            return True
-        try:
-            img = bot.screenshot_for_processing()
-            return self._quiet_call(bot.auto_calibrate, img)
-        except Exception:
-            return False
-
-    @objc.python_method
-    def _board_state(self, bot):
-        if not bot.cols_logical or not bot.rows_logical:
-            return False, None
-        try:
-            img = bot.screenshot_for_processing()
-            board = self._quiet_call(bot.parse_board_cnn, img)
-        except Exception:
-            return False, None
-        if not board:
-            return False, None
-
-        pieces = [p for row in board for p in row if p is not None]
-        piece_count = len(pieces)
-        red_king = sum(1 for p in pieces if p == 'K')
-        black_king = sum(1 for p in pieces if p == 'k')
-
-        confs = []
-        for r in range(10):
-            for c in range(9):
-                probs = getattr(bot.cnn, '_cell_probs', None)
-                if not probs or board[r][c] is None or probs[r][c] is None:
-                    continue
-                confs.append(float(probs[r][c].max()))
-        avg_conf = (sum(confs) / len(confs)) if confs else 0.0
-
-        visible = piece_count >= 6 and red_king == 1 and black_king == 1 and avg_conf >= 0.55
-        return visible, board
-
-    @objc.python_method
-    def _recovery_click_pass(self, bot):
-        actions = [
-            ("关闭弹窗(右上)", 0.93, 0.11, 0.8),
-            ("关闭弹窗(左上)", 0.08, 0.10, 0.8),
-            ("主按钮(底部中间)", 0.50, 0.84, 1.2),
-            ("次按钮(中下)", 0.50, 0.74, 1.0),
-            ("继续按钮(中间)", 0.50, 0.64, 1.0),
-            ("确认按钮(更靠下)", 0.50, 0.91, 1.0),
-            ("右侧按钮", 0.78, 0.84, 1.0),
-        ]
-        bot.activate_window()
-        for label, rx, ry, wait_s in actions:
-            if not self.running:
-                return
-            self.log_msg(f"自动续局: {label}")
-            self._click_relative(bot, rx, ry)
-            time.sleep(wait_s)
-            visible, _ = self._board_state(bot)
-            if visible:
-                self.log_msg("检测到棋盘，准备开局。")
-                return
-
-    @objc.python_method
-    def _recover_to_next_game(self, bot, timeout_s=90):
-        started = time.time()
-        while self.running and time.time() - started < timeout_s:
-            try:
-                bot.find_window()
-            except Exception:
-                time.sleep(1.0)
-                continue
-
-            if self._ensure_supervisor_ready(bot):
-                visible, _ = self._board_state(bot)
-                if visible:
-                    return True
-
-            self._recovery_click_pass(bot)
-            if self._ensure_supervisor_ready(bot):
-                visible, _ = self._board_state(bot)
-                if visible:
-                    return True
-            time.sleep(1.0)
-        return False
-
-    def _run_bot_supervisor(self):
-        try:
-            class LogWriter(io.TextIOBase):
-                def __init__(self, callback):
-                    self.callback = callback
-                def write(self, s):
-                    s = s.strip()
-                    if s:
-                        self.callback(s)
-                    return len(s)
-
-            old_stdout = sys.stdout
-            sys.stdout = LogWriter(self.log_msg)
-
-            Bot = self._setup_bot_runtime()
-            self.status.setStringValue_("自动续局已启动")
-            self.log_msg("自动续局模式已启用。")
-
-            while self.running:
-                bot = Bot()
-                self.bot = bot
-
-                self.status.setStringValue_("正在准备棋局...")
-                if not self._recover_to_next_game(bot):
-                    if self.running:
-                        self.log_msg("未能自动进入棋局，稍后重试。")
-                        time.sleep(2.0)
-                    continue
-
-                if not self.running:
-                    break
-
-                self.status.setStringValue_("对局中...")
-                bot.stop_flag = False
-                self.session_thread = threading.Thread(
-                    target=self._run_single_game, args=(bot,), daemon=True
-                )
-                self.session_thread.start()
-
-                missing_board_checks = 0
-                grace_until = time.time() + 15.0
-                while self.running and self.session_thread.is_alive():
-                    time.sleep(2.0)
-                    if time.time() < grace_until:
-                        continue
-                    if not self._ensure_supervisor_ready(bot):
-                        continue
-                    visible, _ = self._board_state(bot)
-                    if visible:
-                        missing_board_checks = 0
-                        continue
-                    missing_board_checks += 1
-                    if missing_board_checks >= 3:
-                        self.log_msg("检测到棋盘消失，正在结束本局并准备下一局。")
-                        bot.stop_flag = True
-                        self.session_thread.join(timeout=10.0)
-                        break
-
-                if self.session_thread and self.session_thread.is_alive():
-                    self.session_thread.join(timeout=1.0)
-                self.session_thread = None
-
-                if not self.running:
-                    break
-
-                self.status.setStringValue_("准备下一局...")
-                time.sleep(1.0)
-
-            sys.stdout = old_stdout
-            if self.running:
-                self.status.setStringValue_("自动续局已结束")
                 self.stop()
 
         except Exception as e:
