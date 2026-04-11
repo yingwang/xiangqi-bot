@@ -90,6 +90,58 @@ python3 xiangqi_cnn.py augment   # Augment data (brightness, shift, scale, low-r
 python3 xiangqi_cnn.py test      # Test on current board
 ```
 
+## Continuous play (multi-game auto-restart)
+
+`continuous_play.py` is a standalone CLI supervisor that wraps `Bot` in a
+loop: when a game ends, it automatically clicks through the result popups
+and starts the next game. Runs headless — no GUI dependency.
+
+```bash
+python3 continuous_play.py play                # unlimited games
+python3 continuous_play.py play --max-games 5  # stop after 5 games
+python3 continuous_play.py test-templates      # verify templates match current screen
+python3 continuous_play.py detect-end          # one-shot end-of-game check
+python3 continuous_play.py diag                # dump screenshot + window info
+python3 continuous_play.py crop-templates      # print manual cropping workflow
+```
+
+**How it works:**
+
+1. **Game-end detection** — strict (0.95) `cv2.matchTemplate` on a set of
+   end-screen templates (`popup_end_banner`, `popup_level_up`,
+   `popup_badge_earned`, `btn_play_again`, `btn_close_x_top`, `btn_confirm`,
+   `btn_switch_opponent`). Also catches Pikafish `(none)` (mate/stalemate)
+   and a 150s opponent-stuck safety net.
+2. **Tiered recovery** — when a game ends, cycle through template clicks
+   → blind relative-coord clicks → ESC×3 → refind-window until the board
+   becomes visible again.
+3. **Multi-scale template matching** — each template is matched at scales
+   0.85–1.15x against a 0.35x downscaled screenshot for ~7x speedup over
+   naive full-res matching. Stepped thresholds (0.92 → 0.88) with
+   early-exit at 0.97+.
+4. **Click verification** — every click takes before/after screenshots and
+   uses `bot.images_changed` to confirm the screen reacted. Failed clicks
+   go on a 30s cooldown to prevent death loops.
+5. **Failure snapshots** — if recovery times out, a screenshot plus state
+   log is dumped to `continuous_play_debug/<timestamp>/`. End-of-game
+   screenshots are auto-saved to `end_snapshots/` for future template
+   tuning.
+6. **Ctrl+C** — graceful stop on first press; hard force-exit after 4s via
+   a daemon-thread `os._exit(130)` watchdog, so a stuck subprocess can't
+   block shutdown.
+
+**Templates** live in `templates/`. Missing templates degrade gracefully
+(tier 1 just has fewer candidates; tiers 2–4 still run).
+
+**Does not modify** `xiangqi_bot.py` or `app.py` — both are still
+available as the single-game entry points:
+
+| Entry point | Multi-game? |
+|---|---|
+| `python3 xiangqi_bot.py` | no (single game) |
+| `python3 app.py` / `天天象棋Bot.app` | no (GUI, single game) |
+| `python3 continuous_play.py play` | **yes** (auto-restart) |
+
 ## macOS App
 
 A native macOS GUI (`天天象棋Bot.app`) with board display, move history (四字记录法), and start/stop controls.
@@ -115,6 +167,7 @@ python3 app.py
 |------|-------------|
 | `app.py` | macOS GUI app (AppKit/PyObjC, board view, move history) |
 | `xiangqi_bot.py` | Bot engine (game loop, move execution, double-shot parsing) |
+| `continuous_play.py` | Multi-game supervisor (auto-restart between games) |
 | `xiangqi_cnn.py` | CNN model, training, inference, FEN validation |
 | `xiangqi_cnn_onnx.py` | ONNX inference wrapper (no PyTorch needed) |
 | `xiangqi_cnn.onnx` | Trained model weights (ONNX format) |
@@ -125,3 +178,6 @@ python3 app.py
 | `cnn_data/` | Training data by piece type (`red_R/`, `black_r/`, `empty/`, etc.) |
 | `debug/` | Debug patches from latest game session |
 | `calib.json` | Grid calibration data |
+| `templates/` | Popup button templates used by `continuous_play.py` |
+| `end_snapshots/` | Auto-saved end-of-game screenshots (for template tuning) |
+| `continuous_play_debug/` | Failure dumps from `continuous_play.py` (screenshot + state) |
