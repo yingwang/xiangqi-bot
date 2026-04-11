@@ -56,7 +56,7 @@ The NNUE file (`pikafish.nnue`) is already included — it's the neural network 
 python3 xiangqi_bot.py
 ```
 
-On first run, follow the calibration prompts — move your mouse to 2 corners of the board so the bot knows where the grid is. Calibration is saved to `calib.json` and reused until you delete it.
+Calibration is automatic via CNN on first run — no manual input required. The result is saved to `calib.json` and reused until deleted.
 
 Supports both red and black sides. Auto-detects orientation from king position.
 
@@ -93,6 +93,10 @@ python3 xiangqi_cnn.py test      # Test on current board
 ```
 
 ## Continuous play (multi-game auto-restart)
+
+> ⚠️ **Experimental — still unstable.** Occasional popup variants, animation
+> timing, or layout changes may cause the supervisor to stall. Works for
+> most cases but expect the occasional manual rescue.
 
 `continuous_play.py` is a standalone CLI supervisor that wraps `Bot` in a
 loop: when a game ends, it automatically clicks through the result popups
@@ -230,7 +234,7 @@ cp pikafish ../../pikafish
 python3 xiangqi_bot.py
 ```
 
-首次运行需完成校准:将鼠标依次移至棋盘两个对角以确定网格坐标。校准结果写入 `calib.json` 并复用。红黑两方皆支持,依将/帅位置自动识别方向。
+首次运行时通过 CNN 自动完成棋盘网格校准,无需手动输入。校准结果写入 `calib.json` 并复用。红黑两方皆支持,依将/帅位置自动识别方向。
 
 ## CNN 训练
 
@@ -264,6 +268,8 @@ python3 xiangqi_cnn.py test      # 测试当前棋盘识别
 ```
 
 ## 连续对局
+
+> ⚠️ **实验性功能,目前仍不稳定。** 遇到未见过的弹窗变体、动画时序或布局调整时,监督脚本可能失效。大多数情况下可用,偶尔需要人工介入。
 
 `continuous_play.py` 为独立的 CLI 监督脚本,将 `Bot` 置于循环中运行:对局结束后自动关闭结算弹窗并开始下一局,无需图形界面。
 
