@@ -188,6 +188,12 @@ python3 app.py
 | `end_snapshots/` | Auto-saved end-of-game screenshots (for template tuning) |
 | `continuous_play_debug/` | Failure dumps from `continuous_play.py` (screenshot + state) |
 
+## License
+
+This project's own code is released under the [MIT License](LICENSE).
+
+The bundled Pikafish engine binary (`pikafish`) and neural network weights (`pikafish.nnue`) are licensed under **GPL v3** (Pikafish is a fork of Stockfish). Source code: https://github.com/official-pikafish/Pikafish
+
 ---
 
 # 天天象棋机器人
@@ -340,3 +346,9 @@ python3 app.py
 | `templates/` | `continuous_play.py` 使用的模板图 |
 | `end_snapshots/` | 自动保存的结束画面截图 |
 | `continuous_play_debug/` | `continuous_play.py` 异常转储 |
+
+## 许可证
+
+本项目代码以 [MIT 许可证](LICENSE) 发布。
+
+仓库内置的 Pikafish 引擎二进制（`pikafish`）与神经网络权重（`pikafish.nnue`）以 **GPL v3** 许可证发布（Pikafish 为 Stockfish 衍生项目）。Pikafish 源码：https://github.com/official-pikafish/Pikafish
